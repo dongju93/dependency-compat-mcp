@@ -1,0 +1,31 @@
+{
+  "_id": "@example-scope/sample-helper",
+  "name": "@example-scope/sample-helper",
+  "description": "A scoped packument fixture with no engines field.",
+  "dist-tags": { "latest": "3.1.0" },
+  "versions": {
+    "3.1.0": {
+      "name": "@example-scope/sample-helper",
+      "version": "3.1.0",
+      "license": "Apache-2.0",
+      "dependencies": {},
+      "peerDependencies": {
+        "sample-package": ">=4.0.0",
+        "@example-scope/sample-types": "^3.0.0"
+      },
+      "peerDependenciesMeta": {
+        "@example-scope/sample-types": { "optional": true }
+      },
+      "dist": {
+        "shasum": "2222222222222222222222222222222222222222",
+        "tarball": "https://registry.npmjs.org/@example-scope/sample-helper/-/sample-helper-3.1.0.tgz"
+      }
+    }
+  },
+  "time": {
+    "created": "2023-06-01T00:00:00.000Z",
+    "modified": "2026-02-11T07:45:00.000Z",
+    "3.1.0": "2026-02-11T07:45:12.000Z"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,64 @@
+{
+  "_id": "sample-package",
+  "_rev": "12-0000000000000000000000000000000",
+  "name": "sample-package",
+  "description": "A hand-written fixture that mirrors the npm packument shape.",
+  "dist-tags": {
+    "latest": "4.19.2",
+    "next": "5.0.0-beta.1"
+  },
+  "versions": {
+    "4.18.0": {
+      "name": "sample-package",
+      "version": "4.18.0",
+      "engines": { "node": ">= 0.10.0" },
+      "dependencies": { "sample-util": "~1.0.0" },
+      "dist": {
+        "shasum": "0000000000000000000000000000000000000000",
+        "tarball": "https://registry.npmjs.org/sample-package/-/sample-package-4.18.0.tgz"
+      }
+    },
+    "4.19.2": {
+      "name": "sample-package",
+      "version": "4.19.2",
+      "description": "A hand-written fixture that mirrors the npm packument shape.",
+      "license": "MIT",
+      "main": "index.js",
+      "engines": { "node": ">= 18.17.0" },
+      "dependencies": {
+        "sample-util": "^1.4.0",
+        "@example-scope/sample-helper": ">=2.0.0 <4.0.0",
+        "vendored-fork": "file:../vendored-fork",
+        "patched-lib": "git+https://example.invalid/patched-lib.git#v1.2.3",
+        "aliased-lib": "npm:real-lib@^3.0.0",
+        "shorthand-lib": "example-org/shorthand-lib",
+        "tagged-lib": "latest",
+        "numeric-range-lib": 3
+      },
+      "peerDependencies": {
+        "sample-framework": "^7.0.0 || ^8.0.0"
+      },
+      "devDependencies": {
+        "sample-test-runner": "^2.0.0"
+      },
+      "dist": {
+        "integrity": "sha512-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "shasum": "1111111111111111111111111111111111111111",
+        "tarball": "https://registry.npmjs.org/sample-package/-/sample-package-4.19.2.tgz",
+        "fileCount": 16,
+        "unpackedSize": 210344
+      }
+    }
+  },
+  "time": {
+    "created": "2019-03-01T00:00:00.000Z",
+    "modified": "2026-03-20T11:30:00.000Z",
+    "4.18.0": "2022-04-25T18:00:00.000Z",
+    "4.19.2": "2026-03-20T11:24:31.451Z",
+    "4.19.3": "2026-04-01T09:00:00.000Z"
+  },
+  "maintainers": [{ "name": "example-maintainer", "email": "maintainer@example.invalid" }],
+  "license": "MIT",
+  "readme": "# sample-package\n",
+  "readmeFilename": "README.md"
+}

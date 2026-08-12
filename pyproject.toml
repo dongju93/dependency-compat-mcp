@@ -1,0 +1,67 @@
+[project]
+name = "dependency-compat-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [{ name = "dongju93", email = "spdlqj011@gmail.com" }]
+requires-python = ">=3.14"
+dependencies = [
+    "mcp>=2.0.0",
+    "node-semver>=0.9.1",
+    "packaging>=26.3",
+]
+
+[project.scripts]
+dependency-compat-mcp = "dependency_compat_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["mcp[cli]>=2.0.0", "pytest-cov>=7.1.0"]
+
+[tool.ruff]
+extend-exclude = ["docs"]
+line-length = 88
+src = ["src", "tests"]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+docstring-code-format = true
+indent-style = "space"
+line-ending = "auto"
+quote-style = "double"
+
+[tool.pyrefly]
+preset = "strict"
+project-includes = ["src", "tests"]
+project-excludes = [".venv"]
+python-interpreter-path = ".venv/bin/python"
+python-version = "3.14"
+search-path = ["src", "."]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--cov=dependency_compat_mcp",
+    "--cov-report=term-missing",
+]
+markers = ["slow: spawns a subprocess and speaks the stdio wire protocol"]
+minversion = "9.1"
+testpaths = ["tests"]
+xfail_strict = true
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["dependency_compat_mcp"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

@@ -1,0 +1,82 @@
+{
+  "pack_version": "2026.08.1-fixture",
+  "entries": [
+    {
+      "namespace": "pypi",
+      "name": "Example-Framework",
+      "applies_to": ">=5.2,<5.3",
+      "verified_against": ["5.2", "5.2.1"],
+      "reviewed_at": "2026-08-10",
+      "reviewed_by": "fixture-reviewer",
+      "statements": [
+        {
+          "stance": "supports",
+          "counterpart": { "namespace": "runtime", "name": "python" },
+          "expression": ">=3.10,<3.14",
+          "scheme": "pep440",
+          "source": {
+            "source_type": "official_support_policy",
+            "title": "Status of Python versions",
+            "url": "https://devguide.python.org/versions/"
+          }
+        },
+        {
+          "stance": "excludes",
+          "counterpart": { "namespace": "runtime", "name": "python" },
+          "expression": "<3.10",
+          "scheme": "pep440",
+          "source": {
+            "source_type": "official_support_policy",
+            "title": "Status of Python versions",
+            "url": "https://devguide.python.org/versions/"
+          }
+        }
+      ],
+      "changes": [
+        {
+          "category": "removal",
+          "area": "removed_api",
+          "summary": "A module deprecated in an earlier release was removed.",
+          "source": {
+            "source_type": "official_release_note",
+            "title": "What's New In Python 3.13",
+            "url": "https://docs.python.org/3/whatsnew/3.13.html"
+          }
+        }
+      ]
+    },
+    {
+      "namespace": "npm",
+      "name": "@example/toolkit",
+      "applies_to": ">=4.0.0 <5.0.0",
+      "verified_against": ["4.1.0"],
+      "reviewed_at": "2026-08-11",
+      "reviewed_by": "fixture-reviewer",
+      "statements": [
+        {
+          "stance": "supports",
+          "counterpart": { "namespace": "runtime", "name": "node" },
+          "expression": ">=22.0.0",
+          "scheme": "semver",
+          "source": {
+            "source_type": "official_support_policy",
+            "title": "Node.js Releases",
+            "url": "https://nodejs.org/en/about/previous-releases"
+          }
+        }
+      ],
+      "changes": [
+        {
+          "category": "deprecation",
+          "area": "cli_flag",
+          "summary": "A command line flag was deprecated in this release line.",
+          "source": {
+            "source_type": "official_release_note",
+            "title": "Node.js 22 changelog",
+            "url": "https://github.com/nodejs/node/blob/main/doc/changelogs/CHANGELOG_V22.md"
+          }
+        }
+      ]
+    }
+  ]
+}

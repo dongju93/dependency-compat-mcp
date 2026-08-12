@@ -1,0 +1,35 @@
+{
+  "info": {
+    "classifiers": ["Programming Language :: Python :: 3.12"],
+    "description": "A withdrawn release (PEP 592).",
+    "name": "yanked-release",
+    "package_url": "https://pypi.org/project/yanked-release/",
+    "release_url": "https://pypi.org/project/yanked-release/2.0.0/",
+    "requires_dist": [],
+    "requires_python": ">=3.12",
+    "summary": "Yanked because it shipped a broken wheel.",
+    "version": "2.0.0",
+    "yanked": true,
+    "yanked_reason": "Broken wheel; use 2.0.1."
+  },
+  "last_serial": 42,
+  "urls": [
+    {
+      "comment_text": "",
+      "digests": {
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "filename": "yanked_release-2.0.0-py3-none-any.whl",
+      "packagetype": "bdist_wheel",
+      "python_version": "py3",
+      "requires_python": ">=3.12",
+      "size": 1024,
+      "upload_time": "2026-01-15T08:00:00",
+      "upload_time_iso_8601": "2026-01-15T08:00:00.000000Z",
+      "url": "https://files.pythonhosted.org/packages/00/yanked_release-2.0.0-py3-none-any.whl",
+      "yanked": true,
+      "yanked_reason": "Broken wheel; use 2.0.1."
+    }
+  ],
+  "vulnerabilities": []
+}

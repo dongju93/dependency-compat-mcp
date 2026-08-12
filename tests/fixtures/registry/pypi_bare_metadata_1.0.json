@@ -1,0 +1,22 @@
+{
+  "info": {
+    "author": null,
+    "author_email": null,
+    "classifiers": [],
+    "description": "A release whose metadata declares nothing this server can use.",
+    "description_content_type": null,
+    "name": "bare-metadata",
+    "package_url": "https://pypi.org/project/bare-metadata/",
+    "project_urls": null,
+    "release_url": "https://pypi.org/project/bare-metadata/1.0/",
+    "requires_dist": null,
+    "requires_python": null,
+    "summary": "No requires_python, no requires_dist, no usable classifiers.",
+    "version": "1.0",
+    "yanked": false,
+    "yanked_reason": null
+  },
+  "last_serial": 1,
+  "urls": [],
+  "vulnerabilities": []
+}
