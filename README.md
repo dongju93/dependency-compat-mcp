@@ -61,6 +61,16 @@ MCP Python SDK의 `MCPServer`가 Python 타입 힌트에서 도구 스키마를 
 
 같은 `MCPServer`를 로컬용 `stdio`와 원격용 무상태 Streamable HTTP로 모두 제공합니다. MCP `2026-07-28`에서는 요청마다 프로토콜 버전과 클라이언트 정보가 전달되므로 연결이나 세션에 판정 상태를 저장하지 않습니다.
 
+SDK 기본값을 그대로 두지 않고 손댄 곳이 세 군데 있으며, 모두 "광고한 것과 실제 동작이 같아야 한다"는 한 가지 이유에서 나왔습니다.
+
+| 조정                              | 이유                                                                                                                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Tools만 광고**                  | Prompts·Resources 핸들러를 제거해 `METHOD_NOT_FOUND`로 답합니다. 빈 목록을 반환하면 구현하지 않은 역량을 광고하는 셈입니다.                                                                |
+| **최상위 인자 객체 닫기**         | SDK는 중첩 모델에만 `extra="forbid"`를 적용합니다. 미들웨어가 `subject`/`counterpart`/`target` 외 키를 거부하고, 같은 사실을 `inputSchema`의 `additionalProperties: false`로도 광고합니다. |
+| **출력 스키마의 `$ref` 인라인화** | `RootModel`은 `{"$ref": ...}`를 내보내 판별자(`verdict`, `availability`)를 한 단계 뒤로 숨깁니다. 참조 대상을 루트로 끌어올려 `oneOf`와 `discriminator`가 첫 화면에 오게 합니다.           |
+
+미들웨어는 알 수 없는 인자를 예외가 아니라 `is_error: true`인 `CallToolResult`로 돌려줍니다. 중첩 필드 위반은 SDK가 이미 그 모양으로 반환하므로, 같은 실수가 한쪽은 JSON-RPC 오류로 다른 쪽은 도구 결과로 도착하는 상황을 만들지 않기 위해서입니다.
+
 관련 공식 문서:
 
 - [MCP Specification 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28)
@@ -105,12 +115,15 @@ MCP Python SDK의 `MCPServer`가 Python 타입 힌트에서 도구 스키마를 
 | `verdict_evidence_ids` | `supported`/`unsupported`를 직접 지지하는 evidence ID의 부분집합 | 설치를 허용하거나 거부한 제약의 evidence ID          |
 | `notices`              | **확인된** 사실 중 verdict를 바꾸지 않는 것                      | 릴리스가 yanked됨, 메타데이터와 공식 문서의 불일치   |
 | `limitations`          | **확인하지 못한** 범위                                           | 큐레이션 항목 없음, 상한이 열려 있음, 소스 조회 실패 |
+| `summary`              | 구조화 결과를 그대로 옮긴 한 줄 요약                             | 판정·규칙·근거 개수, 역방향으로 읽었다는 사실        |
 
 예를 들어 설치 게이트가 버전을 거부하지만 공식 지원 문서는 허용한다고 말할 수 있습니다. 이때 두 출처는 모두 `evidence`에 보존하되, `verdict_evidence_ids`는 `unsupported`를 직접 지지하는 설치 게이트만 가리키고 불일치는 `notices`가 관련 evidence ID를 참조합니다.
 
 여기에 `sources_checked`가 더해져, 서버가 어떤 소스를 열었고 결과가 무엇이었는지(`ok` / `not_found` / `failed` / `skipped`)를 알려줍니다. **`unknown`을 받은 호출자가 다음에 무엇을 할지 결정할 수 있어야 하기 때문입니다.**
 
 `notices`와 `limitations`는 자유 문장이 아니라 닫힌 코드 집합이며, 모델이 쓴 완곡 표현이 아니라 계산 결과입니다.
+
+`summary`도 같은 원칙을 따릅니다. **문장을 작성하는 코드 경로가 없습니다.** `(판정, 규칙, 방향, 개수)`로 닫힌 템플릿 목록에서 하나를 고르고, 호출자가 이미 받은 결과의 값으로 채웁니다. 템플릿 목록 자체가 테스트로 고정되어 있어 문장이 하나 늘어나는 것도 리뷰를 거친 변경이어야 합니다. 최종 사용자용 표현과 언어는 MCP 클라이언트의 몫이므로 이 문자열은 영어 기계 판독용 요약으로 남습니다.
 
 ## 2. 코드베이스 비교용 컨텍스트 조회
 
@@ -129,7 +142,16 @@ MCP Python SDK의 `MCPServer`가 Python 타입 힌트에서 도구 스키마를 
 - 각 사실이 참조하는 공식 근거
 - 수집하지 못했거나 정확한 버전에 대해 검증하지 못한 범위
 
-응답 최상위의 **`depth`**가 `registry_only`인지 `registry_and_curated`인지 먼저 알려줍니다. `registry_only`이면 그 응답은 패키지 메타데이터의 구조화 재전달이며, 사람이 검토한 공식 진술이나 변경 사항은 들어 있지 않다는 뜻입니다. 호출자는 본문을 파싱하기 전에 추가 조사가 필요한지 판단할 수 있습니다.
+이 도구는 판정하지 않으므로 `verdict`가 없고, 대신 최상위에 판별자 두 개를 이 순서로 둡니다.
+
+| 필드           | 값                                        | 읽는 법                                    |
+| -------------- | ----------------------------------------- | ------------------------------------------ |
+| `availability` | `available` \| `unknown`                  | 비교 재료를 하나라도 찾았는가              |
+| `depth`        | `registry_only` \| `registry_and_curated` | 그 재료에 사람이 검토한 근거가 섞여 있는가 |
+
+`availability: "available"`은 `constraints`나 `changes`가 **반드시 하나 이상** 있다는 뜻이고, `availability: "unknown"`은 둘 다 **반드시 비어 있다**는 뜻입니다. 두 방향 모두 타입이 강제하므로 "available인데 본문이 빈" 응답은 만들어질 수 없습니다. `unknown`일 때는 `reason`이 `release_not_found`, `lookup_failed`, `evidence_not_found` 중 하나로 함께 옵니다.
+
+`depth`가 `registry_only`이면 그 응답은 패키지 메타데이터의 구조화 재전달이며, 사람이 검토한 공식 진술이나 변경 사항은 들어 있지 않다는 뜻입니다. 호출자는 본문을 파싱하기 전에 추가 조사가 필요한지 판단할 수 있습니다. `depth`는 카탈로그 전체가 아니라 **실제로 인용된** 근거에서 계산합니다. 응답에 아무것도 기여하지 못한 큐레이션 항목이 깊이를 광고하지 못하게 하기 위해서입니다.
 
 서버는 사용자의 코드베이스를 받거나 읽지 않습니다. MCP 클라이언트가 서버의 구조화된 사실을 manifest, lockfile, 소스 코드와 비교해 최종 설명을 만듭니다.
 
@@ -188,6 +210,10 @@ MCP Python SDK의 `MCPServer`가 Python 타입 힌트에서 도구 스키마를 
 로더, 스키마 검증, 조회, 출력 경로는 모두 구현되고 실제 항목 fixture로 테스트되지만, 저장소에 커밋된 팩(`src/dependency_compat_mcp/curated/pack/compatibility.json`)의 `entries`는 **비어 있습니다**. 사람이 공식 출처와 대조해 리뷰한 근거만 팩에 들어갈 수 있고, 구현 과정에서 근거를 지어내지 않았기 때문입니다.
 
 따라서 지금 이 서버의 모든 응답은 `depth: registry_only`이고 `limitations`에 `curated_pack_missing`이 붙습니다. 아래 2번 항목이 그 결과입니다.
+
+**런타임 릴리스 표는 다른 이야기입니다.** `curated/runtime_releases.json`은 비어 있지 않으며, 2026-08-12 기준 CPython 461개와 Node.js 860개 릴리스의 출시일·EOL을 담은 완전한 스냅샷입니다. `scripts/build_runtime_releases.py`가 python.org 다운로드 API, peps.python.org 릴리스 사이클, nodejs.org dist 인덱스, nodejs/Release 일정표 네 곳의 1차 출처에서 생성하며, 정렬이 결정적이라 diff를 리뷰할 수 있습니다. 손으로 고치지 말고 재생성하십시오.
+
+EOL이 `YYYY-MM`으로만 공표된 라인은 `eol_at: null`입니다. 월을 일자로 바꾸면 없는 사실을 만드는 것이고, 하한 staleness 검사는 `null`에 대해 발화하지 않으므로 정직해도 잃는 것이 없습니다.
 
 ### 2. 실질 가치는 큐레이션 팩 커버리지와 같습니다
 
@@ -252,21 +278,44 @@ MCP Python SDK의 `MCPServer`가 Python 타입 힌트에서 도구 스키마를 
 | 범위                                                                     | 위치                                            |
 | ------------------------------------------------------------------------ | ----------------------------------------------- |
 | `check_compatibility`, `get_compatibility_context`과 02·04의 입출력 계약 | `server.py`, `contracts/`                       |
+| I/O와 순수 판정을 잇는 파이프라인, `TaskGroup` 수집, 요청 예산           | `service.py`                                    |
 | 네 관계 규칙과 규칙별 방향 정책                                          | `domain/relations.py`                           |
 | 단계 0~7 결정 절차 (순수 총함수)                                         | `domain/evaluate.py`                            |
+| `get_compatibility_context`의 재료 수집과 `availability`·`depth` 계산    | `domain/context.py`                             |
+| 닫힌 코드 집합인 `notices`·`limitations`                                 | `domain/diagnostics.py`                         |
+| 템플릿에서만 고르는 `summary`                                            | `domain/summaries.py`                           |
+| 인터페이스로 취급하는 도구 설명 텍스트와 그 필수 요소                    | `descriptions.py`                               |
 | PyPI JSON API, npm registry, 런타임 릴리스·EOL 표, 큐레이션 팩, TTL 캐시 | `adapters/`, `curated/`, `infra/cache.py`       |
 | `packaging`/`node-semver`를 분리한 PEP 440·508 및 npm SemVer 처리        | `domain/versions.py`, `domain/targets.py`       |
 | 로컬 `stdio`와 원격 무상태 Streamable HTTP                               | `cli.py`                                        |
 | 시간·응답 크기·허용 호스트 제한, 취소 전파                               | `infra/http.py`                                 |
 | 근거 참조 무결성 검증                                                    | `contracts/assembly.py`, `contracts/outputs.py` |
+| 런타임 릴리스 표 생성기 (요청 경로 밖, 저장소 유일의 네트워크 접근)      | `scripts/build_runtime_releases.py`             |
 
-종속성은 `mcp`, `packaging`, `node-semver` 세 개이며 `uv.lock`과 동기화되어 있습니다. 그 밖의 종속성은 추가·승격·교체하지 않았습니다.
+### 네트워크와 캐시 한계
+
+요청 경로의 외부 접근은 전부 `infra/http.py` 한 곳을 지나며, 한계값은 관례가 아니라 구조로 강제됩니다.
+
+| 항목            | 값                                                                     |
+| --------------- | ---------------------------------------------------------------------- |
+| 허용 호스트     | `pypi.org`, `registry.npmjs.org` (하드코딩)                            |
+| URL 조립        | `build_url`이 유일한 생성자. 사용자 입력은 URL이 될 수 없음            |
+| 리다이렉트      | 최대 3홉, **매 홉마다** 호스트 재검증 (클라이언트 자동 추적 비활성)    |
+| 응답 본문       | 5 MiB. 스트리밍 중 검사가 기준이고 `Content-Length`는 조기 탈출용일 뿐 |
+| 시도당 타임아웃 | 5초 (본문 읽기 포함)                                                   |
+| 요청 전체 예산  | 15초                                                                   |
+| TTL 캐시        | 900초. 키에 `pack_version`이 포함되어 팩 변경이 캐시를 무효화          |
+
+조회 실패는 예외가 아니라 값(`HttpFailed`)입니다. 예외였다면 스택 어딘가에서 잡혀 이를 위한 분기를 가진 판정 함수까지 도달하지 못했을 것입니다. 유일한 예외는 `asyncio.CancelledError`로, 이것은 레지스트리의 실패가 아니라 호출자가 질문을 철회한 것입니다.
+
+종속성은 `mcp`, `packaging`, `node-semver` 세 개이며 `uv.lock`과 동기화되어 있습니다. 다만 `infra/http.py`는 `mcp`가 끌어오는 `httpx2`를 직접 import 하며, 이는 `pyproject.toml`에 선언되어 있지 않습니다.
 
 ### 검증
 
 ```bash
-uv run pytest            # 608 tests
+uv run pytest                 # 612 tests, 커버리지 91%
 uv tool run ruff check .
+uv tool run ruff format --check .
 uv tool run pyrefly check
 ```
 
@@ -275,9 +324,15 @@ uv tool run pyrefly check
 | 기준                                          | 테스트                                                                          |
 | --------------------------------------------- | ------------------------------------------------------------------------------- |
 | 인메모리 클라이언트로 스키마·구조화 출력      | `tests/test_mcp_contract.py`                                                    |
-| `stdio`와 `/mcp`에서 같은 도구·결과           | `tests/test_transports.py`                                                      |
+| `stdio`와 `/mcp`에서 같은 도구·결과           | `tests/test_transports.py`, `tests/test_cli.py`                                 |
 | 판정 총함수 성질, 티어 규칙 불변식            | `tests/test_evaluate.py`                                                        |
+| 관계 규칙과 방향 정책                         | `tests/test_relations.py`                                                       |
 | 파서 round-trip, 경계 버전, marker·prerelease | `tests/test_targets.py`, `tests/test_versions.py`, `tests/test_markers.py`      |
 | 어댑터 계약(비정상 JSON, 크기, rate limit)    | `tests/test_pypi_adapter.py`, `tests/test_npm_adapter.py`, `tests/test_http.py` |
+| 파이프라인 조립, 캐시, 런타임 표 조회         | `tests/test_service.py`, `tests/test_cache.py`, `tests/test_runtimes.py`        |
+| 팩 스키마 거부 규칙(전용 fixture 팩)          | `tests/test_curated_loader.py`                                                  |
+| 컨텍스트 `availability`·`depth` 계산          | `tests/test_context.py`                                                         |
+| `summary` 템플릿 목록 고정                    | `tests/test_summaries.py`                                                       |
+| 도구 설명의 필수 요소 존재와 순서             | `tests/test_descriptions.py`                                                    |
 | 결정성(`retrieved_at` 제외 동일 바이트)       | `tests/test_determinism.py`                                                     |
 | 요청 경로에 모델 호출 없음(계층 규칙)         | `tests/test_layering.py`                                                        |
