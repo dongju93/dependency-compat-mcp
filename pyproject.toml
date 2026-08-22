@@ -1,6 +1,6 @@
 [project]
 name = "dependency-compat-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server answering whether two exact package or runtime versions work together, with sources"
 readme = "README.md"
 license = "MIT"
