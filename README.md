@@ -1,6 +1,6 @@
 # dependency-compat-mcp
 
-**"이 두 버전, 같이 써도 됩니까?"**에 공식 1차 출처와 함께 답하는 Model Context Protocol(MCP) 서버입니다.
+사용자가 지정한 두 패키지 또는 패키지와 런타임의 버전 조합이 공식 배포 정보에 명시된 요구 버전 범위를 만족하는지 확인해 답하는 Model Context Protocol(MCP) 서버입니다.
 
 서버는 정확한 두 릴리스, 즉 배포된 두 버전(예: `pypi:django@5.2`와 `runtime:python@3.13`)을 비교합니다. 서버는 비교 결과를 `supported` / `unsupported` / `unknown` 중 하나로 표시하고, **판단에 사용한 근거도 함께** 돌려줍니다. 서버는 요청을 처리하는 동안 언어 모델을 호출하지 않습니다. 버전 범위 해석과 비교는 Python 패키지용 `packaging`과 npm 패키지용 `node-semver`가 담당합니다.
 
@@ -32,49 +32,16 @@ claude mcp add --transport http dependency-compat \
 | Node.js 릴리스 목록과 출시일 | `nodejs.org`                                          |
 | Node.js 릴리스별 지원 종료일 | `raw.githubusercontent.com` (`nodejs/Release` 저장소) |
 
-### 바로 연결할 수 있는 공개 서버 (권장)
+### Claude Code
 
 ```bash
-# Claude Code
 claude mcp add --transport http dependency-compat \
   https://dependency-compat-mcp-git-769945419767.asia-northeast3.run.app/mcp
-
-# Codex CLI
-codex mcp add dependency-compat \
-  --url https://dependency-compat-mcp-git-769945419767.asia-northeast3.run.app/mcp
 ```
 
-MCP 클라이언트 설정 파일에 직접 등록하려면 다음 값을 사용합니다.
+### Codex
 
-```json
-{
-  "mcpServers": {
-    "dependency-compat": {
-      "type": "http",
-      "url": "https://dependency-compat-mcp-git-769945419767.asia-northeast3.run.app/mcp"
-    }
-  }
-}
-```
-
-### 표준 입출력(stdio)으로 로컬 실행
-
-Claude Code가 로컬 서버 프로세스를 실행하도록 등록하려면 다음 명령을 사용합니다.
-
-```bash
-claude mcp add dependency-compat -- uvx --python 3.14 dependency-compat-mcp
-```
-
-```json
-{
-  "mcpServers": {
-    "dependency-compat": {
-      "command": "uvx",
-      "args": ["--python", "3.14", "dependency-compat-mcp"]
-    }
-  }
-}
-```
+**제한사항** — Codex는 이 서버가 사용하는 MCP `2026-07-28` 연결 방식을 아직 지원하지 않아 도구 목록을 불러오거나 도구를 호출할 수 없습니다.
 
 ### HTTP 서버 직접 호스팅
 
