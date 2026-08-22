@@ -34,9 +34,17 @@ claude mcp add --transport http dependency-compat \
 
 ### Claude Code
 
+공개 서버에 연결합니다.
+
 ```bash
 claude mcp add --transport http dependency-compat \
   https://dependency-compat-mcp-git-769945419767.asia-northeast3.run.app/mcp
+```
+
+서버를 직접 실행해서 쓰려면 PyPI에 배포된 패키지를 stdio로 실행합니다. `uvx`가 실행 시점에 패키지를 내려받으므로 저장소를 복제하지 않아도 되고, 서버는 클라이언트와 같은 컴퓨터의 자식 프로세스로 뜹니다.
+
+```bash
+claude mcp add dependency-compat -- uvx dependency-compat-mcp
 ```
 
 ### Codex
@@ -46,10 +54,22 @@ claude mcp add --transport http dependency-compat \
 ### HTTP 서버 직접 호스팅
 
 ```bash
-uv run dependency-compat-mcp --transport http --host 127.0.0.1 --port 8000
+uvx dependency-compat-mcp --transport http --host 127.0.0.1 --port 8000
 ```
 
+저장소를 복제해 실행할 때는 `uv sync` 뒤에 `uv run dependency-compat-mcp --transport http`를 사용합니다.
+
 HTTP 전송은 `POST /mcp` 엔드포인트 하나를 사용합니다. HTTP 서버는 클라이언트별 세션 상태를 저장하지 않으므로, 같은 설정의 서버 인스턴스를 여러 개 실행할 수 있습니다. 서버는 `--host`와 `--port`에 지정한 주소를 기준으로 허용할 HTTP `Host` 및 `Origin` 헤더를 정합니다. 클라이언트와 서버 사이에서 요청을 전달하는 리버스 프록시가 요청 주소를 다른 `Host` 헤더로 보내면 DNS 재바인딩 공격 방어가 해당 요청을 거부합니다. 인터넷에 서버를 공개할 때는 리버스 프록시나 클라우드 서비스에서 HTTPS 암호화(TLS)와 사용자 인증을 구성해야 합니다.
+
+저장소의 `Dockerfile`은 Cloud Run 배포를 위한 이미지입니다. 서버는 Cloud Run이 주입하는 `K_SERVICE`, `K_REVISION`, `K_CONFIGURATION`이 모두 있을 때만 `0.0.0.0`에 바인딩하고, 그렇지 않으면 기본값인 루프백 주소에 바인딩합니다. 그래서 이 이미지를 로컬에서 실행할 때는 바인딩 주소를 직접 지정해야 컨테이너 밖에서 접속할 수 있습니다.
+
+```bash
+docker build -t dependency-compat-mcp .
+docker run --rm -p 8080:8080 dependency-compat-mcp \
+  --transport http --host 0.0.0.0 --port 8080
+```
+
+컨테이너를 인터넷에 공개할 때는 `--public-base-url https://<공개 주소>`(또는 환경 변수 `MCP_PUBLIC_BASE_URL`)로 실제 공개 주소를 알려줘야 `Host`와 `Origin` 검증이 그 주소를 기준으로 동작합니다.
 
 ---
 
