@@ -65,11 +65,24 @@ def _codes(result: dict[str, Any], key: str) -> list[str]:
     return [item["code"] for item in result[key]]
 
 
-def _outcome(result: dict[str, Any], source: str) -> str | None:
+def _outcome(
+    result: dict[str, Any], source: str, name: str | None = None
+) -> str | None:
+    """The outcome of one lookup, optionally narrowed to the target it was made for.
+
+    Both sides of a same-registry comparison produce a row for the same source, so a test
+    that means one of them has to say which.
+    """
     for check in result["sources_checked"]:
-        if check["source"] == source:
+        if check["source"] == source and (
+            name is None or check["target"]["name"] == name
+        ):
             return check["outcome"]
     return None
+
+
+def _kinds(result: dict[str, Any]) -> list[str]:
+    return [cause["kind"] for cause in result["decision_causes"]]
 
 
 # --------------------------------------------------------------------------------------
@@ -144,7 +157,9 @@ def test_an_open_ceiling_on_a_later_runtime_is_unknown_not_supported() -> None:
 
     assert result["verdict"] == "unknown"
     assert result["reason"] == "insufficient_evidence"
-    assert "open_upper_bound" in _codes(result, "limitations")
+    assert _kinds(result) == ["open_upper_bound"]
+    # The cause cites the gate itself, so the caller can read the open range it names.
+    assert result["decision_causes"][0]["evidence_ids"] == ["evidence-1"]
     # The gate is still returned: "it installs" is exactly the fact the caller needs.
     assert any(e.get("expression") == ">=3.10" for e in result["evidence"])
     assert "verdict_evidence_ids" not in result
@@ -172,7 +187,7 @@ def test_classifiers_alone_never_produce_supported() -> None:
     )
 
     assert result["verdict"] == "unknown"
-    assert "tier_c_only" in _codes(result, "limitations")
+    assert _kinds(result) == ["tier_c_only"]
 
 
 def test_a_reversed_question_is_answered_and_says_so() -> None:
@@ -240,7 +255,9 @@ def test_an_unsupported_relation_costs_no_lookup() -> None:
     # The variant carries the input pair and nothing invented.
     assert set(result["relation"]) == {"status", "subject", "counterpart"}
     assert fetcher.calls == []
-    assert {c["outcome"] for c in result["sources_checked"]} == {"skipped"}
+    # No lookup was planned, so there is no lookup to report. Inventing rows here would
+    # have meant naming a target the server never intended to open.
+    assert result["sources_checked"] == []
 
 
 def test_a_missing_release_is_reported_apart_from_a_failed_lookup() -> None:
@@ -528,3 +545,256 @@ def test_every_unregistered_pair_ends_in_relation_not_supported(
 ) -> None:
     result = _check(build_service(FakeFetcher()), subject, counterpart)
     assert result["reason"] == "relation_not_supported"
+
+
+# --------------------------------------------------------------------------------------
+# Decision causes and per-target lookups
+#
+# These are the properties the response contract now rests on. Each one used to be
+# derivable only by re-reading prose - a summary sentence, an `explanation` string, or a
+# merged `sources_checked` row - and each is asserted here as structure instead.
+# --------------------------------------------------------------------------------------
+
+
+def _app_requiring(marker: str, dependency: str = "helper") -> FakeFetcher:
+    return FakeFetcher(
+        payloads={
+            pypi_url("app", "1.0"): pypi_release(
+                "app", "1.0", requires_dist=[f"{dependency}>=1.0; {marker}"]
+            ),
+            pypi_url(dependency, "1.5"): pypi_release(dependency, "1.5"),
+        }
+    )
+
+
+def test_an_environment_marker_reaches_the_response_verbatim() -> None:
+    """The marker survives registry text -> claim -> cause -> response without a rewrite."""
+    result = _check(
+        build_service(_app_requiring('sys_platform == "win32"')),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+
+    assert result["reason"] == "insufficient_evidence"
+    (cause,) = result["decision_causes"]
+    assert cause["kind"] == "conditional_claim"
+    assert cause["condition"] == {
+        "kind": "environment_marker",
+        "expression": 'sys_platform == "win32"',
+        "variables": ["sys_platform"],
+    }
+    # And the summary quotes that same string rather than paraphrasing the condition.
+    assert 'sys_platform == "win32"' in result["summary"]
+
+
+def test_an_extra_guard_is_reported_as_an_extra_not_an_environment() -> None:
+    """`extra` is selected by the installing project, not read from the environment."""
+    result = _check(
+        build_service(_app_requiring('extra == "argon2"')),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+
+    (cause,) = result["decision_causes"]
+    assert cause["condition"]["kind"] == "extra_marker"
+    assert cause["condition"]["expression"] == 'extra == "argon2"'
+    assert "selects no extra" in result["summary"]
+
+
+def test_every_cause_cites_evidence_that_resolves_in_the_same_response() -> None:
+    result = _check(
+        build_service(_app_requiring('sys_platform == "win32"')),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+
+    known = {item["id"] for item in result["evidence"]}
+    cited = {i for cause in result["decision_causes"] for i in cause["evidence_ids"]}
+    assert cited
+    assert cited <= known
+
+
+def test_a_decided_verdict_carries_no_decision_causes() -> None:
+    """Only an `unknown` has a question left open, so only it can name a cause."""
+    result = _check(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app", "1.0", requires_dist=["helper>=1.0"]
+                    ),
+                    pypi_url("helper", "1.5"): pypi_release("helper", "1.5"),
+                }
+            )
+        ),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+
+    assert result["verdict"] == "supported"
+    assert "decision_causes" not in result
+
+
+def test_the_same_source_read_for_two_targets_stays_two_rows() -> None:
+    """A merged row cannot say which release was actually confirmed to exist."""
+    result = _check(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app", "1.0", requires_dist=["helper>=1.0"]
+                    ),
+                    pypi_url("helper", "1.5"): pypi_release("helper", "1.5"),
+                }
+            )
+        ),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+
+    registry = [c for c in result["sources_checked"] if c["source"] == "pypi_json"]
+    assert [(c["role"], c["target"]["name"], c["outcome"]) for c in registry] == [
+        ("declaring", "app", "ok"),
+        ("declared_about", "helper", "ok"),
+    ]
+    assert all(check["required"] for check in registry)
+
+
+def test_one_side_failing_does_not_swallow_the_other_side_succeeding() -> None:
+    result = _check(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app", "1.0", requires_dist=["helper>=1.0"]
+                    )
+                },
+                failures={pypi_url("helper", "1.5"): "timeout"},
+            )
+        ),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+
+    assert _outcome(result, "pypi_json", "app") == "ok"
+    assert _outcome(result, "pypi_json", "helper") == "failed"
+
+
+def test_a_failed_counterpart_lookup_is_not_reported_as_a_missing_release() -> None:
+    """The server never got an answer, so it must not assert that the release is absent.
+
+    Both releases are premises of the verdict, so both lookups are required. Treating the
+    counterpart as optional - as an earlier version did - let a timeout fall through to
+    `release_not_found`, which states as fact something the server did not learn.
+    """
+    failing = _check(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app", "1.0", requires_dist=["helper>=1.0"]
+                    )
+                },
+                failures={pypi_url("helper", "1.5"): "timeout"},
+            )
+        ),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+    assert failing["reason"] == "lookup_failed"
+
+    # A confirmed 404 is a different answer and keeps its own reason.
+    absent = _check(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app", "1.0", requires_dist=["helper>=1.0"]
+                    )
+                }
+            )
+        ),
+        ("pypi", "app", "1.0"),
+        ("pypi", "helper", "1.5"),
+    )
+    assert absent["reason"] == "release_not_found"
+
+
+def test_a_reversed_reading_labels_roles_by_the_declaration_not_the_arguments() -> None:
+    """Under `direction: reversed` the roles must follow the declaring side, not input order."""
+    result = _check(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app", "1.0", requires_python=">=3.10,<3.14"
+                    )
+                }
+            )
+        ),
+        ("runtime", "python", "3.13.0"),
+        ("pypi", "app", "1.0"),
+    )
+
+    assert result["relation"]["direction"] == "reversed"
+    roles = {
+        (check["role"], check["target"]["namespace"])
+        for check in result["sources_checked"]
+    }
+    assert ("declaring", "pypi") in roles
+    assert ("declared_about", "runtime") in roles
+    assert result["summary"].endswith(
+        "The arguments were read in reverse: the declaration comes from pypi:app 1.0."
+    )
+
+
+def test_a_marker_that_cannot_be_settled_is_never_reported_as_decided() -> None:
+    """A marker naming nothing PEP 508 defines is undecidable, not constant.
+
+    `"a" == "a"` looks like a tautology, but `packaging` reads the right-hand side as an
+    environment key, so evaluating it without an environment fails. The conservative
+    reading is the correct one: the server does not know, and says so.
+    """
+    result = _context(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app", "1.0", requires_dist=['helper>=1.0; "a" == "a"']
+                    )
+                }
+            )
+        ),
+        ("pypi", "app", "1.0"),
+    )
+
+    (constraint,) = result["constraints"]
+    assert constraint["condition"]["kind"] == "environment_marker"
+    assert constraint["condition"]["variables"] == []
+
+
+def test_context_constraints_carry_a_structured_condition() -> None:
+    result = _context(
+        build_service(
+            FakeFetcher(
+                payloads={
+                    pypi_url("app", "1.0"): pypi_release(
+                        "app",
+                        "1.0",
+                        requires_dist=[
+                            "plain>=1.0",
+                            'guarded>=1.0; sys_platform == "win32"',
+                            'optional>=1.0; extra == "fast"',
+                        ],
+                    )
+                }
+            )
+        ),
+        ("pypi", "app", "1.0"),
+    )
+
+    by_name = {c["counterpart"]["name"]: c["condition"] for c in result["constraints"]}
+    assert by_name["plain"] == {"kind": "unconditional"}
+    assert by_name["guarded"]["kind"] == "environment_marker"
+    assert by_name["guarded"]["variables"] == ["sys_platform"]
+    assert by_name["optional"]["kind"] == "extra_marker"

@@ -44,37 +44,39 @@ SERVER_INSTRUCTIONS: Final[str] = (
     "hold. The server never receives a repository, a file, or a search term, and it "
     "resolves neither ranges nor dependency graphs; a resolver is the right tool for "
     "those. An unknown result states that current evidence does not settle the "
-    "question, and the reported limitations and sources_checked say where to look next."
+    "question; decision_causes names what left it open, and sources_checked lists every "
+    "lookup with the exact release it was made for."
 )
 
 
 CHECK_COMPATIBILITY_DESCRIPTION: Final[str] = (
     "Does one exact release work with another exact release, and on what evidence? "
-    "Call this once both sides are pinned: a PyPI or npm package release, or a Python or "
-    "Node runtime release. Do not call it with a version range or file contents; "
-    "resolving ranges and reading a codebase are out of scope. Argument "
-    "order is meaning. Under the pypi -> pypi requires_dist and npm -> npm dependencies "
-    "rules, order fixes the declaring side, so swapping arguments asks a different "
-    "question. For pypi with runtime:python and npm with runtime:node the declaring side "
-    "follows from the kind of target, so either order reads the same; relation.direction "
-    "reports which way the server read it. A verdict of unknown is a normal result "
-    "meaning the claim cannot be proven from current evidence. It is not an error and not "
-    "a reason to retry: limitations and sources_checked carry the next thing to check."
+    "Call this once both sides are pinned: a PyPI or npm release, or a Python or Node "
+    "runtime. Do not call it with a version range or file contents; range "
+    "resolution and codebase reading are out of scope. Argument order is meaning. Under "
+    "the pypi -> pypi requires_dist and npm -> npm dependencies rules, order fixes the "
+    "declaring side, so swapping arguments asks another question. For pypi with "
+    "runtime:python and npm with runtime:node the kind of target fixes the declaring "
+    "side, so either order reads the same; relation.direction reports which way it was "
+    "read. A verdict of unknown is a normal result: the claim is not provable from "
+    "current evidence. It is not an error and not a reason to retry: decision_causes "
+    "names why it stayed open, and limitations and sources_checked carry the next "
+    "thing to check."
 )
 
 
 GET_COMPATIBILITY_CONTEXT_DESCRIPTION: Final[str] = (
-    "What does one exact release declare and state about compatibility, so you can "
-    "compare it with code you already hold? Call this when a single target is pinned and "
-    "you want its declared constraints and reviewed changes. Do not call it with a "
-    "version range, a repository path, or source text; the server is never given a "
-    "codebase and compares nothing for you. This tool takes one target, so it has "
-    "no argument order to get wrong; ordering matters only in check_compatibility, where "
-    "input order fixes the declaring side for the pypi -> pypi and npm -> npm rules while "
-    "the kind of target fixes it for the runtime rules, and relation.direction reports how "
-    "the pair was read. An availability of unknown is a normal result meaning current "
-    "evidence proves nothing here, not an error and not a reason to retry: limitations "
-    "and sources_checked carry the next thing to check."
+    "What does one exact release declare and state about compatibility? Call this when a "
+    "single target is pinned and you want its declared constraints and reviewed changes. "
+    "Do not call it with a version range, a repository path, or source text; the server "
+    "never sees a codebase and compares nothing for you. This tool takes one target, so "
+    "there is no argument order to get wrong; order matters only in check_compatibility, "
+    "where it fixes the declaring side for the pypi -> pypi and npm -> npm rules, the "
+    "kind of target fixes it for the runtime rules, and relation.direction reports how "
+    "the pair was read. Each constraint carries a condition field: unconditional, an "
+    "environment marker, or a selected extra. An availability of unknown is a normal "
+    "result: current evidence proves nothing here. Not an error and not a reason to "
+    "retry: limitations and sources_checked carry the next thing to check."
 )
 
 

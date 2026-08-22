@@ -23,14 +23,19 @@ from typing import assert_never
 from dependency_compat_mcp.contracts.outputs import (
     ChangeOut,
     CheckCompatibilityResult,
+    ConditionalClaimOut,
+    ConditionOut,
     ConstraintOut,
     ContextAvailableResult,
     ContextUnknownResult,
     CuratedProvenanceOut,
+    DecidedMarkerOut,
+    DecisionCauseOut,
     EvidenceOut,
     FetchedProvenanceOut,
     GetCompatibilityContextResult,
     LimitationOut,
+    MarkerGuardOut,
     NarrativeEvidenceOut,
     NoticeOut,
     RelationOut,
@@ -39,7 +44,9 @@ from dependency_compat_mcp.contracts.outputs import (
     SupportedResult,
     TargetIdOut,
     TargetOut,
+    UnconditionalOut,
     UnknownResult,
+    UnprovenClaimOut,
     UnsupportedRelationOut,
     UnsupportedResult,
     VersionConstraintEvidenceOut,
@@ -49,6 +56,7 @@ from dependency_compat_mcp.domain.claims import (
     Evidence,
     EvidenceId,
     Fetched,
+    MarkerCondition,
     NarrativeEvidence,
     Provenance,
     SourceCheck,
@@ -63,7 +71,14 @@ from dependency_compat_mcp.domain.context import (
     ContextOutcome,
     ContextUnknown,
 )
-from dependency_compat_mcp.domain.diagnostics import Limitation, Notice
+from dependency_compat_mcp.domain.diagnostics import (
+    ConditionalClaim,
+    DecisionCause,
+    Limitation,
+    Notice,
+    UnprovenClaim,
+    cause_evidence_ids,
+)
 from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.evaluate import (
     Supported,
@@ -84,7 +99,12 @@ from dependency_compat_mcp.domain.targets import (
     version_of,
 )
 
-__all__ = ["build_check_result", "build_context_result", "target_out"]
+__all__ = [
+    "build_check_result",
+    "build_context_result",
+    "condition_out",
+    "target_out",
+]
 
 
 def target_out(target: Target) -> TargetOut:
@@ -204,9 +224,71 @@ def _limitations_out(limitations: Iterable[Limitation]) -> tuple[LimitationOut, 
     return tuple(LimitationOut(code=limitation.code) for limitation in limitations)
 
 
+def condition_out(condition: MarkerCondition | None) -> ConditionOut:
+    """Project a claim's marker onto the public condition union.
+
+    The four ``decidability`` values map onto three shapes rather than being flattened to
+    "has a marker or not": a caller has to be able to tell "no marker" from "a marker that
+    evaluates to false for everyone", and neither of those is "a marker I must decide".
+    """
+    if condition is None:
+        return UnconditionalOut()
+    match condition.decidability:
+        case "environment_dependent":
+            return MarkerGuardOut(
+                kind="environment_marker",
+                expression=condition.expression,
+                variables=condition.variables,
+            )
+        case "extra_guarded":
+            return MarkerGuardOut(
+                kind="extra_marker",
+                expression=condition.expression,
+                variables=condition.variables,
+            )
+        case "always_true":
+            return DecidedMarkerOut(expression=condition.expression, holds=True)
+        case "always_false":
+            return DecidedMarkerOut(expression=condition.expression, holds=False)
+        case never:
+            assert_never(never)
+
+
+def _causes_out(
+    causes: Iterable[DecisionCause], mapping: Mapping[EvidenceId, str]
+) -> tuple[DecisionCauseOut, ...]:
+    out: list[DecisionCauseOut] = []
+    for cause in causes:
+        public_ids = tuple(mapping[i] for i in cause_evidence_ids(cause))
+        match cause:
+            case ConditionalClaim(condition=condition):
+                out.append(
+                    ConditionalClaimOut(
+                        condition=MarkerGuardOut(
+                            kind=condition.kind,
+                            expression=condition.expression,
+                            variables=condition.variables,
+                        ),
+                        evidence_ids=public_ids,
+                    )
+                )
+            case UnprovenClaim(kind=kind):
+                out.append(UnprovenClaimOut(kind=kind, evidence_ids=public_ids))
+            case _:
+                assert_never(cause)
+    return tuple(out)
+
+
 def _sources_out(sources: Iterable[SourceCheck]) -> tuple[SourceCheckOut, ...]:
     return tuple(
-        SourceCheckOut(source=check.source, outcome=check.outcome, detail=check.detail)
+        SourceCheckOut(
+            source=check.source,
+            target=target_out(check.target),
+            role=check.role,
+            required=check.required,
+            outcome=check.outcome,
+            detail=check.detail,
+        )
         for check in sorted(sources, key=source_check_sort_key)
     )
 
@@ -225,9 +307,9 @@ def build_check_result(
     """Assemble a ``check_compatibility`` response from domain values.
 
     ``referenced_evidence_ids`` is the union of the verdict's own evidence, every notice's
-    evidence, and the evidence behind the claims that were considered. Including the last
-    group is what lets an ``unknown / conflicting_evidence`` return *both* sides of the
-    conflict, which 04 requires.
+    evidence, every decision cause's evidence, and the evidence behind the claims that were
+    considered. Including the last group is what lets an ``unknown / conflicting_evidence``
+    return *both* sides of the conflict, which 04 requires.
     """
     catalogue = list(evidence)
     notices = tuple(verdict.notices)
@@ -239,8 +321,9 @@ def build_check_result(
             Supported(verdict_evidence_ids=ids) | Unsupported(verdict_evidence_ids=ids)
         ):
             referenced.update(ids)
-        case Unknown():
-            pass
+        case Unknown(causes=causes):
+            for cause in causes:
+                referenced.update(cause_evidence_ids(cause))
         case _:
             assert_never(verdict)
 
@@ -269,8 +352,14 @@ def build_check_result(
                     verdict_evidence_ids=tuple(mapping[i] for i in ids), **shared
                 )
             )
-        case Unknown(reason=reason):
-            return CheckCompatibilityResult(UnknownResult(reason=reason, **shared))
+        case Unknown(reason=reason, causes=causes):
+            return CheckCompatibilityResult(
+                UnknownResult(
+                    reason=reason,
+                    decision_causes=_causes_out(causes, mapping),
+                    **shared,
+                )
+            )
         case _:
             assert_never(verdict)
 
@@ -283,6 +372,7 @@ def _constraint_out(
         counterpart=_target_id_out(constraint.counterpart),
         version_expression=constraint.version_expression,
         version_scheme=constraint.version_scheme,
+        condition=condition_out(constraint.condition),
         explanation=constraint.explanation,
         evidence_ids=tuple(mapping[i] for i in constraint.evidence_ids),
     )

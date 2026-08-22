@@ -33,7 +33,20 @@ FRAMEWORK = parse_target("pypi", "example-framework", "5.2")
 PYTHON_ID = TargetId.of(parse_target("runtime", "python", "3.13"))
 
 FULLY_CURATED = CuratedCoverage(entry_present=True, verified_for_version=True)
-OK_LOOKUPS = (SourceCheck(source="pypi_json", outcome="ok"),)
+
+
+def check(source: str, outcome: str, *, required: bool = True) -> SourceCheck:
+    """A lookup record. Every check names the release it was made for."""
+    return SourceCheck(
+        source=source,  # pyrefly: ignore[bad-argument-type]
+        target=FRAMEWORK,
+        role="declaring",
+        outcome=outcome,  # pyrefly: ignore[bad-argument-type]
+        required=required,
+    )
+
+
+OK_LOOKUPS = (check("pypi_json", "ok"),)
 
 FETCHED = Fetched(retrieved_at=datetime(2026, 8, 12, tzinfo=UTC))
 REVIEWED = Curated(reviewed_at=date(2026, 8, 10), pack_version="2026.08.1")
@@ -71,6 +84,7 @@ def constraint(*evidence_ids: str) -> ContextConstraint:
         counterpart=PYTHON_ID,
         version_expression=">=3.10",
         version_scheme="pep440",
+        condition=None,
         explanation="The distribution requires this runtime range.",
         evidence_ids=evidence_ids or ("ev-registry",),
     )
@@ -121,7 +135,7 @@ def test_a_required_lookup_failure_outranks_a_missing_release() -> None:
     outcome = build_context(
         context(
             release_found=False,
-            lookups=(SourceCheck(source="pypi_json", outcome="failed", required=True),),
+            lookups=(check("pypi_json", "failed"),),
         )
     )
     assert isinstance(outcome, ContextUnknown)
@@ -189,9 +203,7 @@ def test_limitations_use_the_same_rules_as_the_verdict_path() -> None:
         context(
             constraints=(constraint(),),
             curated=CuratedCoverage(entry_present=False, verified_for_version=False),
-            lookups=(
-                SourceCheck(source="curated_pack", outcome="failed", required=False),
-            ),
+            lookups=(check("curated_pack", "failed", required=False),),
             marker_guarded=True,
             extra_guarded=True,
         )
@@ -239,6 +251,7 @@ def test_a_constraint_must_cite_evidence() -> None:
             counterpart=PYTHON_ID,
             version_expression=">=3.10",
             version_scheme="pep440",
+            condition=None,
             explanation="",
             evidence_ids=(),
         )
@@ -289,7 +302,7 @@ def test_build_context_is_total_and_deterministic() -> None:
         for changes in ((), (change(),))
         for lookups in (
             OK_LOOKUPS,
-            (SourceCheck(source="pypi_json", outcome="failed", required=True),),
+            (check("pypi_json", "failed"),),
         )
         for curated in (
             FULLY_CURATED,

@@ -15,6 +15,10 @@ Three structural decisions carry most of the correctness:
 * Claim classification is a separate, closed step. Every claim lands in exactly one bucket
   (or is dropped because its own marker rules it out), and the verdict steps only read
   buckets - so "which evidence supported the verdict" is never re-derived later.
+* An ``unknown`` that says "the evidence was insufficient" has to say *what* was
+  insufficient. ``Unknown`` refuses to be constructed with that reason and an empty
+  ``causes``, and refuses to carry causes under any other reason, so "insufficient, but
+  the server will not say why" has no representation either.
 * Anything outside the documented combinations raises
   :class:`~dependency_compat_mcp.domain.errors.InvariantViolation` rather than degrading to
   ``unknown``. An internal defect must not be able to hide inside a normal result.
@@ -30,13 +34,20 @@ from dependency_compat_mcp.domain.claims import (
     Corroboration,
     EvidenceId,
     InstallationGate,
+    MarkerCondition,
     ReleaseFacts,
     SourceCheck,
 )
 from dependency_compat_mcp.domain.diagnostics import (
+    ClaimGuard,
+    ConditionalClaim,
+    DecisionCause,
     Limitation,
     LimitationCode,
     Notice,
+    UnprovenClaim,
+    guard_of,
+    sorted_causes,
     sorted_limitations,
     sorted_notices,
 )
@@ -165,11 +176,31 @@ class Unknown:
 
     It has no ``verdict_evidence_ids`` field: an ``unknown`` that cited supporting evidence
     would be a contradiction, so the type does not offer the field to fill in.
+
+    ``causes`` is the mirror image. Every other reason names its own cause - a lookup
+    failed, a release is missing, two statements disagree - and needs nothing further.
+    ``insufficient_evidence`` is the only reason that is a category rather than a fact, so
+    it is the only one that must be accompanied by causes, and the only one allowed to
+    carry them.
+
+    The causes are ordered *here* rather than by whichever factory built the value.
+    ``summaries`` narrates ``causes[0]``, so "the sentence names the leading structured
+    cause" is a property of the type; leaving the ordering to a helper would have made it
+    a property of remembering to call one.
     """
 
     reason: UnknownReason
     notices: tuple[Notice, ...]
     limitations: tuple[Limitation, ...]
+    causes: tuple[DecisionCause, ...] = ()
+
+    def __post_init__(self) -> None:
+        if bool(self.causes) != (self.reason == "insufficient_evidence"):
+            raise InvariantViolation(
+                "decision causes belong to insufficient_evidence and to no other "
+                f"reason; got reason={self.reason!r} with {len(self.causes)} cause(s)"
+            )
+        object.__setattr__(self, "causes", sorted_causes(self.causes))
 
 
 type Verdict = Supported | Unsupported | Unknown
@@ -188,6 +219,7 @@ class _Applies:
     evidence_id: EvidenceId
     limitation: LimitationCode | None = None
     closes_ceiling: bool = False
+    cause: DecisionCause | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +247,10 @@ class _Buckets:
     indeterminate: tuple[EvidenceId, ...]
     closed_ceiling: bool
     limitations: tuple[LimitationCode, ...]
+    # One per claim that landed in `indeterminate`, carrying why it decided nothing. The
+    # bucket holds evidence ids only, so without this the reason would have to be
+    # re-derived downstream from prose.
+    causes: tuple[DecisionCause, ...]
 
 
 def _claim_evidence_id(claim: Claim) -> EvidenceId:
@@ -227,6 +263,23 @@ def _claim_evidence_id(claim: Claim) -> EvidenceId:
             return identifier
         case _:
             assert_never(claim)
+
+
+def _conditional_cause(
+    condition: MarkerCondition, evidence_id: EvidenceId
+) -> DecisionCause:
+    """Wrap an undecidable marker as the cause it is.
+
+    Called only from the two branches whose ``decidability`` is undecidable, so
+    :func:`guard_of` cannot answer ``None`` here; if it ever does, the classifier and the
+    guard projection have drifted apart and that is a defect, not thin evidence.
+    """
+    guard: ClaimGuard | None = guard_of(condition)
+    if guard is None:  # pragma: no cover - unreachable by construction
+        raise InvariantViolation(
+            f"a decided marker reached the conditional branch: {condition.expression!r}"
+        )
+    return ConditionalClaim(condition=guard, evidence_ids=(evidence_id,))
 
 
 def _classify_gate(gate: InstallationGate, version: ExactVersion) -> _Outcome:
@@ -242,12 +295,14 @@ def _classify_gate(gate: InstallationGate, version: ExactVersion) -> _Outcome:
                     bucket="indeterminate",
                     evidence_id=gate.evidence_id,
                     limitation="marker_guarded_claim",
+                    cause=_conditional_cause(condition, gate.evidence_id),
                 )
             case "extra_guarded":
                 return _Applies(
                     bucket="indeterminate",
                     evidence_id=gate.evidence_id,
                     limitation="extra_guarded_claim",
+                    cause=_conditional_cause(condition, gate.evidence_id),
                 )
             case "always_true":
                 pass
@@ -258,7 +313,13 @@ def _classify_gate(gate: InstallationGate, version: ExactVersion) -> _Outcome:
     if admitted is None:
         # Different schemes, or an expression this ecosystem's parser rejects. Comparing
         # across schemes is forbidden by 03, so the claim decides nothing here.
-        return _Applies(bucket="indeterminate", evidence_id=gate.evidence_id)
+        return _Applies(
+            bucket="indeterminate",
+            evidence_id=gate.evidence_id,
+            cause=UnprovenClaim(
+                kind="uncomparable_claim", evidence_ids=(gate.evidence_id,)
+            ),
+        )
     if admitted:
         return _Applies(
             bucket="gate_satisfied",
@@ -272,11 +333,27 @@ def _classify_statement(
     statement: CompatibilityStatement, version: ExactVersion
 ) -> _Outcome:
     admitted = admits(statement.expression, statement.scheme, version)
-    if admitted is None or not admitted:
+    if admitted is None:
+        return _Applies(
+            bucket="indeterminate",
+            evidence_id=statement.evidence_id,
+            cause=UnprovenClaim(
+                kind="uncomparable_claim", evidence_ids=(statement.evidence_id,)
+            ),
+        )
+    if not admitted:
         # A range that does not cover the version says nothing *about* that version.
         # Reading "supports >=3.10,<3.14" as an exclusion of 3.14 would be absence-as-
-        # evidence, which 03 forbids outright.
-        return _Applies(bucket="indeterminate", evidence_id=statement.evidence_id)
+        # evidence, which 03 forbids outright. The two ways a statement can decide
+        # nothing are reported apart, because only this one means the author did write a
+        # range and simply did not write it about this release.
+        return _Applies(
+            bucket="indeterminate",
+            evidence_id=statement.evidence_id,
+            cause=UnprovenClaim(
+                kind="claim_outside_range", evidence_ids=(statement.evidence_id,)
+            ),
+        )
     match statement.stance:
         case "supports":
             return _Applies(bucket="stated_includes", evidence_id=statement.evidence_id)
@@ -341,6 +418,7 @@ def _classify_all(claims: Sequence[Claim], version: ExactVersion) -> _Buckets:
         "indeterminate": [],
     }
     limitations: list[LimitationCode] = []
+    causes: list[DecisionCause] = []
     closed_ceiling = False
 
     for claim in claims:
@@ -353,6 +431,8 @@ def _classify_all(claims: Sequence[Claim], version: ExactVersion) -> _Buckets:
                     grouped[bucket].append(identifier)
                 if outcome.limitation is not None:
                     limitations.append(outcome.limitation)
+                if outcome.cause is not None:
+                    causes.append(outcome.cause)
                 # One closed ceiling bounds the conjunction of gates, so `any` is the
                 # right reading of "the author enumerated the supported range".
                 closed_ceiling = closed_ceiling or outcome.closes_ceiling
@@ -368,6 +448,7 @@ def _classify_all(claims: Sequence[Claim], version: ExactVersion) -> _Buckets:
         indeterminate=tuple(grouped["indeterminate"]),
         closed_ceiling=closed_ceiling,
         limitations=tuple(limitations),
+        causes=tuple(causes),
     )
 
 
@@ -465,11 +546,14 @@ def _unknown(
     reason: UnknownReason,
     notices: Iterable[Notice],
     limitations: Iterable[Limitation],
+    causes: Iterable[DecisionCause] = (),
 ) -> Unknown:
     return Unknown(
         reason=reason,
         notices=sorted_notices(notices),
         limitations=sorted_limitations(limitations),
+        # Not sorted here: `Unknown` owns that, so every path gets the same order.
+        causes=tuple(causes),
     )
 
 
@@ -519,7 +603,13 @@ def _step_five(
         return _unknown(
             "insufficient_evidence",
             notices,
-            [*limitations, Limitation("open_upper_bound")],
+            limitations,
+            # The satisfied gates *are* the open-ended ranges, so they are the evidence a
+            # caller has to read to see why nothing here amounts to a support statement.
+            [
+                UnprovenClaim(kind="open_upper_bound", evidence_ids=gates),
+                *buckets.causes,
+            ],
         )
 
     if _declared_about_was_eol(facts):
@@ -530,7 +620,11 @@ def _step_five(
         return _unknown(
             "insufficient_evidence",
             notices,
-            [*limitations, Limitation("stale_lower_bound")],
+            limitations,
+            [
+                UnprovenClaim(kind="stale_lower_bound", evidence_ids=gates),
+                *buckets.causes,
+            ],
         )
 
     return _supported(gates, notices, limitations)
@@ -547,13 +641,24 @@ def _step_six(
 
     if buckets.corroborates:
         # Absolute rule 3 of 03, expressed as an outcome: tier C alone never carries a
-        # verdict, however many positive labels it enumerates.
+        # verdict, however many positive labels it enumerates. Any indeterminate claims
+        # ride along rather than being dropped - this branch outranks them, but they are
+        # equally part of why the question stayed open.
         return _unknown(
-            "insufficient_evidence", notices, [*limitations, Limitation("tier_c_only")]
+            "insufficient_evidence",
+            notices,
+            limitations,
+            [
+                UnprovenClaim(kind="tier_c_only", evidence_ids=buckets.corroborates),
+                *buckets.causes,
+            ],
         )
 
     if buckets.indeterminate:
-        return _unknown("insufficient_evidence", notices, limitations)
+        # Every indeterminate classification produces a cause, so this list is non-empty
+        # and `Unknown` accepts it. An empty one would raise rather than ship a bare
+        # "insufficient_evidence" the caller cannot act on.
+        return _unknown("insufficient_evidence", notices, limitations, buckets.causes)
 
     if relation.rule.declares_dependency:
         # "These two packages are unrelated" is a different answer than "nothing was

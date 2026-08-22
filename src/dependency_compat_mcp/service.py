@@ -14,12 +14,15 @@ the MCP layer:
 * **Lookups are structured.** Both sides are fetched inside one ``asyncio.TaskGroup``, so a
   failure cancels its sibling and no task outlives the call.
 * **What the server says it checked is what the verdict was computed from.** The same
-  ``SourceCheck`` values are handed to ``evaluate`` and serialised as ``sources_checked``.
+  ``SourceCheck`` values are handed to ``evaluate`` and serialised as ``sources_checked``,
+  one row per lookup rather than one per source. An earlier version merged rows by source
+  and kept the worst outcome; on a ``pypi x pypi`` comparison that turned two lookups of
+  ``pypi_json`` into a single row from which the caller could not tell which release had
+  actually been confirmed to exist.
 """
 
 import asyncio
 import logging
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final, assert_never
@@ -53,16 +56,15 @@ from dependency_compat_mcp.curated.loader import (
     statement_claims,
 )
 from dependency_compat_mcp.domain.claims import (
-    SOURCE_IDS,
     Claim,
     CompatibilityStatement,
     Corroboration,
     Evidence,
     EvidenceId,
     InstallationGate,
+    LookupRole,
     ReleaseFacts,
     SourceCheck,
-    SourceId,
     YankedInfo,
     claim_evidence_id,
 )
@@ -168,15 +170,14 @@ class CompatibilityService:
     ) -> CheckCompatibilityResult:
         """End the request without any lookup (03 [2]).
 
-        Every source is reported as ``skipped`` rather than omitted, so the caller can see
-        that the server stopped on purpose rather than failing to reach anything.
+        ``sources_checked`` comes back empty, and that emptiness is the record. A previous
+        version emitted one ``skipped`` row per known source id; once a check names the
+        target it was made for, those rows would have had to name a target no lookup was
+        ever planned for, inventing the very fact the list exists to report. Emptiness is
+        unambiguous instead: ``UnknownResult`` refuses to be built with an empty
+        ``sources_checked`` under any other reason.
         """
-        sources = tuple(
-            SourceCheck(source=source, outcome="skipped", required=False)
-            for source in SOURCE_IDS
-        )
         # No limitations: nothing was left unverified, because nothing needed verifying.
-        # `sources_checked` already records that every source was skipped on purpose.
         verdict = Unknown(reason="relation_not_supported", notices=(), limitations=())
         return build_check_result(
             subject=subject,
@@ -186,7 +187,7 @@ class CompatibilityService:
             summary=summarise_verdict(verdict=verdict, resolution=resolution),
             evidence=(),
             referenced_evidence_ids=(),
-            sources=sources,
+            sources=(),
         )
 
     async def _check_resolved(
@@ -209,8 +210,10 @@ class CompatibilityService:
         )
         evidence.extend(curated_evidence)
 
-        checks = self._merge_checks(
-            [*declaring_side.checks, *declared_side.checks, self._pack_check(entry)]
+        checks = (
+            *declaring_side.checks,
+            *declared_side.checks,
+            self._pack_check(entry, relation.declaring),
         )
 
         facts = ReleaseFacts(
@@ -252,9 +255,9 @@ class CompatibilityService:
         self, target: Target
     ) -> GetCompatibilityContextResult:
         """Return comparison material for one release. This tool never judges."""
-        side = await self._collect_one_with_budget(target, is_declaring=True)
+        side = await self._collect_one_with_budget(target, role="declaring")
         entry = self.pack.lookup(target)
-        checks = self._merge_checks([*side.checks, self._pack_check(entry)])
+        checks = (*side.checks, self._pack_check(entry, target))
 
         evidence: list[Evidence] = []
         constraints: list[ContextConstraint] = []
@@ -322,38 +325,40 @@ class CompatibilityService:
             async with asyncio.timeout(self.request_budget_seconds):
                 async with asyncio.TaskGroup() as group:
                     declaring_task = group.create_task(
-                        self._collect_one(declaring, is_declaring=True)
+                        self._collect_one(declaring, role="declaring")
                     )
                     declared_task = group.create_task(
-                        self._collect_one(declared_about, is_declaring=False)
+                        self._collect_one(declared_about, role="declared_about")
                     )
         except TimeoutError:
             return (
-                self._completed_or_timeout(declaring_task, declaring),
-                self._completed_or_timeout(declared_task, declared_about),
+                self._completed_or_timeout(declaring_task, declaring, "declaring"),
+                self._completed_or_timeout(
+                    declared_task, declared_about, "declared_about"
+                ),
             )
         if declaring_task is None or declared_task is None:  # pragma: no cover
             raise InvariantViolation("collection tasks were not created")
         return declaring_task.result(), declared_task.result()
 
     async def _collect_one_with_budget(
-        self, target: Target, *, is_declaring: bool
+        self, target: Target, *, role: LookupRole
     ) -> _Collected:
         """Collect one target without letting it outlive the request budget."""
         try:
             async with asyncio.timeout(self.request_budget_seconds):
-                return await self._collect_one(target, is_declaring=is_declaring)
+                return await self._collect_one(target, role=role)
         except TimeoutError:
-            return self._timed_out(target)
+            return self._timed_out(target, role)
 
     def _completed_or_timeout(
-        self, task: asyncio.Task[_Collected] | None, target: Target
+        self, task: asyncio.Task[_Collected] | None, target: Target, role: LookupRole
     ) -> _Collected:
         if task is not None and task.done() and not task.cancelled():
             return task.result()
-        return self._timed_out(target)
+        return self._timed_out(target, role)
 
-    def _timed_out(self, target: Target) -> _Collected:
+    def _timed_out(self, target: Target, role: LookupRole) -> _Collected:
         """Represent an exhausted call-level budget as a required lookup failure."""
         match target:
             case PyPITarget() | NpmTarget():
@@ -370,21 +375,26 @@ class CompatibilityService:
             found=False,
             checks=(
                 SourceCheck(
-                    source=source, outcome="failed", required=True, detail="timeout"
+                    source=source,
+                    target=target,
+                    role=role,
+                    outcome="failed",
+                    required=True,
+                    detail="timeout",
                 ),
             ),
         )
 
-    async def _collect_one(self, target: Target, *, is_declaring: bool) -> _Collected:
+    async def _collect_one(self, target: Target, *, role: LookupRole) -> _Collected:
         match target:
             case PythonRuntimeTarget() | NodeRuntimeTarget():
-                return self._collect_runtime(target)
+                return self._collect_runtime(target, role=role)
             case PyPITarget() | NpmTarget():
-                return await self._collect_registry(target, is_declaring=is_declaring)
+                return await self._collect_registry(target, role=role)
             case _:
                 assert_never(target)
 
-    def _collect_runtime(self, target: Target) -> _Collected:
+    def _collect_runtime(self, target: Target, *, role: LookupRole) -> _Collected:
         source = self.runtimes.source_id_for(target)
         found = self.runtimes.fetch_release(target)
         match found:
@@ -395,7 +405,11 @@ class CompatibilityService:
                     eol_at=eol_at,
                     yanked=None,
                     found=True,
-                    checks=(SourceCheck(source=source, outcome="ok"),),
+                    checks=(
+                        SourceCheck(
+                            source=source, target=target, role=role, outcome="ok"
+                        ),
+                    ),
                 )
             case RuntimeReleaseMissing():
                 return _Collected(
@@ -404,13 +418,17 @@ class CompatibilityService:
                     eol_at=None,
                     yanked=None,
                     found=False,
-                    checks=(SourceCheck(source=source, outcome="not_found"),),
+                    checks=(
+                        SourceCheck(
+                            source=source, target=target, role=role, outcome="not_found"
+                        ),
+                    ),
                 )
             case _:
                 assert_never(found)
 
     async def _collect_registry(
-        self, target: Target, *, is_declaring: bool
+        self, target: Target, *, role: LookupRole
     ) -> _Collected:
         adapter = self._adapter_for(target)
         key: CacheKey = (
@@ -434,7 +452,14 @@ class CompatibilityService:
                     eol_at=None,
                     yanked=lookup.yanked,
                     found=True,
-                    checks=(SourceCheck(source=adapter.source_id, outcome="ok"),),
+                    checks=(
+                        SourceCheck(
+                            source=adapter.source_id,
+                            target=target,
+                            role=role,
+                            outcome="ok",
+                        ),
+                    ),
                 )
             case ReleaseNotFound():
                 return _Collected(
@@ -444,7 +469,12 @@ class CompatibilityService:
                     yanked=None,
                     found=False,
                     checks=(
-                        SourceCheck(source=adapter.source_id, outcome="not_found"),
+                        SourceCheck(
+                            source=adapter.source_id,
+                            target=target,
+                            role=role,
+                            outcome="not_found",
+                        ),
                     ),
                 )
             case LookupFailed(detail=detail):
@@ -457,10 +487,17 @@ class CompatibilityService:
                     checks=(
                         SourceCheck(
                             source=adapter.source_id,
+                            target=target,
+                            role=role,
                             outcome="failed",
-                            # Only the declaring side is required: without it there is
-                            # nothing to read a declaration from.
-                            required=is_declaring,
+                            # Both sides are required. The declaring side carries the
+                            # declaration; the counterpart carries the premise that the
+                            # exact release asked about exists at all, and step 5 reads
+                            # its publication date. Marking the counterpart optional -
+                            # as this once did - let a failed lookup fall through to
+                            # `release_not_found`, which asserts as fact that the release
+                            # does not exist when the server never got an answer.
+                            required=True,
                             detail=detail,
                         ),
                     ),
@@ -517,11 +554,15 @@ class CompatibilityService:
             verified_for_version=self.pack.verified_for(entry, target),
         )
 
-    def _pack_check(self, entry: PackEntry | None) -> SourceCheck:
+    def _pack_check(self, entry: PackEntry | None, target: Target) -> SourceCheck:
         # The pack is always consulted, and "consulted, nothing there" is a real answer -
-        # it is what separates `curated_pack_missing` from a failed lookup.
+        # it is what separates `curated_pack_missing` from a failed lookup. It is looked up
+        # for the declaring target only: the pack records what a release states about
+        # others, so there is nothing to ask it about the counterpart.
         return SourceCheck(
             source="curated_pack",
+            target=target,
+            role="declaring",
             outcome="ok" if entry is not None else "not_found",
             required=False,
         )
@@ -529,28 +570,6 @@ class CompatibilityService:
     # ----------------------------------------------------------------------------------
     # Helpers
     # ----------------------------------------------------------------------------------
-
-    @staticmethod
-    def _merge_checks(checks: Iterable[SourceCheck]) -> tuple[SourceCheck, ...]:
-        """One record per source, keeping the worst outcome.
-
-        Both sides of a ``pypi x pypi`` comparison read ``pypi_json``; reporting it twice
-        would suggest two distinct sources were consulted.
-        """
-        severity: Final = {"ok": 0, "not_found": 1, "skipped": 2, "failed": 3}
-        worst: dict[SourceId, SourceCheck] = {}
-        for check in checks:
-            current = worst.get(check.source)
-            if (
-                current is None
-                or severity[check.outcome] > severity[current.outcome]
-                or (
-                    severity[check.outcome] == severity[current.outcome]
-                    and check.required
-                )
-            ):
-                worst[check.source] = check
-        return tuple(worst.values())
 
     async def aclose(self) -> None:
         """Release the shared HTTP client, when this service owns one.
@@ -589,6 +608,7 @@ def _claim_to_constraint(
                     counterpart=claim.declared_about,
                     version_expression=claim.expression,
                     version_scheme=claim.scheme,
+                    condition=condition,
                     explanation=explanation,
                     evidence_ids=(claim.evidence_id,),
                 ),
@@ -601,6 +621,9 @@ def _claim_to_constraint(
                     counterpart=claim.declared_about,
                     version_expression=claim.expression,
                     version_scheme=claim.scheme,
+                    # Curated statements carry no PEP 508 marker; the reviewer records the
+                    # range that applies, not one guarded by an environment.
+                    condition=None,
                     explanation=(
                         "Declared as a supported range."
                         if stance == "supports"

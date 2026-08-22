@@ -42,6 +42,18 @@ PAYLOADS: dict[str, Any] = {
     pypi_url("example-framework", "5.2"): pypi_release(
         "example-framework", "5.2", requires_python=">=3.10"
     ),
+    # Two conditional declarations about one target, so the response carries more than one
+    # decision cause. Their order is what fixes the summary sentence, which makes it the
+    # newest thing in the response that could vary between runs.
+    pypi_url("guarded-app", "1.0"): pypi_release(
+        "guarded-app",
+        "1.0",
+        requires_dist=[
+            'helper>=1.0; sys_platform == "win32"',
+            'helper>=2.0; python_version < "3.11"',
+        ],
+    ),
+    pypi_url("helper", "1.5"): pypi_release("helper", "1.5"),
     npm_url("react"): npm_packument(
         "react",
         "19.1.1",
@@ -56,6 +68,7 @@ CASES = [
     (("pypi", "django", "5.2"), ("pypi", "asgiref", "3.8.1")),
     (("npm", "react", "19.1.1"), ("runtime", "node", "22.17.0")),
     (("runtime", "python", "3.13.0"), ("runtime", "node", "22.17.0")),
+    (("pypi", "guarded-app", "1.0"), ("pypi", "helper", "1.5")),
 ]
 
 

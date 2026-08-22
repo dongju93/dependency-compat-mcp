@@ -23,7 +23,14 @@ from typing import Final, Literal, assert_never
 
 from packaging.markers import InvalidMarker, Marker
 
-from dependency_compat_mcp.domain.targets import TargetId, VersionScheme
+from dependency_compat_mcp.domain.targets import (
+    Target,
+    TargetId,
+    VersionScheme,
+    name_of,
+    namespace_of,
+    version_of,
+)
 from dependency_compat_mcp.domain.versions import BoundedVersion
 
 __all__ = [
@@ -36,6 +43,7 @@ __all__ = [
     "EvidenceId",
     "Fetched",
     "InstallationGate",
+    "LookupRole",
     "MarkerCondition",
     "MarkerDecidability",
     "NarrativeEvidence",
@@ -67,6 +75,11 @@ type SourceId = Literal[
     "node_release_table",
 ]
 type LookupOutcome = Literal["ok", "not_found", "failed", "skipped"]
+# Which side of the resolved relation a lookup was made for. `get_compatibility_context`
+# has one target and reads its declarations, so that target is `declaring` there too.
+type LookupRole = Literal["declaring", "declared_about"]
+
+_ROLE_ORDER: Final[dict[str, int]] = {"declaring": 0, "declared_about": 1}
 
 SOURCE_IDS: Final[tuple[SourceId, ...]] = (
     "pypi_json",
@@ -117,10 +130,16 @@ _VARIABLE_RE: Final = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class MarkerCondition:
-    """A PEP 508 marker plus how far it can be decided without an environment."""
+    """A PEP 508 marker, how far it can be decided, and what it depends on.
+
+    ``variables`` is carried rather than re-derived downstream: the response tells the
+    caller *which* environment facts would settle the marker, and re-parsing the
+    expression at the contract boundary would let the two answers drift apart.
+    """
 
     expression: str
     decidability: MarkerDecidability
+    variables: tuple[str, ...] = ()
 
 
 def analyse_marker(expression: str) -> MarkerCondition:
@@ -144,20 +163,27 @@ def analyse_marker(expression: str) -> MarkerCondition:
     a marker, and guessing wrong is invisible to the caller.
     """
     literal_free = _STRING_LITERAL_RE.sub("", expression)
+    variables = tuple(sorted(set(_VARIABLE_RE.findall(literal_free))))
     if _EXTRA_TOKEN_RE.search(literal_free):
         # An extra-guarded dependency is not part of a default install, so it is never
         # treated as present.
-        return MarkerCondition(expression=expression, decidability="extra_guarded")
+        return MarkerCondition(
+            expression=expression, decidability="extra_guarded", variables=variables
+        )
     try:
         marker = Marker(expression)
     except InvalidMarker:
         return MarkerCondition(
-            expression=expression, decidability="environment_dependent"
+            expression=expression,
+            decidability="environment_dependent",
+            variables=variables,
         )
 
-    if _VARIABLE_RE.search(literal_free):
+    if variables:
         return MarkerCondition(
-            expression=expression, decidability="environment_dependent"
+            expression=expression,
+            decidability="environment_dependent",
+            variables=variables,
         )
 
     # No variables left: the expression is constant, so one evaluation settles it.
@@ -346,18 +372,36 @@ class ReleaseFacts:
 
 @dataclass(frozen=True, slots=True)
 class SourceCheck:
-    """What the server opened and what came back.
+    """One lookup: what the server opened, *for which target*, and what came back.
 
     Passed *into* the decision procedure so that ``lookup_failed`` is derived from an
     explicit value rather than from a caught exception, and so the ``sources_checked``
     the caller reads is the very value the verdict was computed from.
+
+    ``target`` and ``role`` are part of the identity of a check rather than decoration.
+    Both sides of a ``pypi x pypi`` comparison read ``pypi_json``; without the target,
+    one side's success and the other's failure collapse into a single unreadable row and
+    the caller cannot audit which release was actually confirmed to exist.
     """
 
     source: SourceId
+    target: Target
+    role: LookupRole
     outcome: LookupOutcome
     required: bool = True
     detail: str | None = None
 
 
-def source_check_sort_key(check: SourceCheck) -> tuple[int, str]:
-    return (SOURCE_IDS.index(check.source), check.outcome)
+def source_check_sort_key(check: SourceCheck) -> tuple[int, str, str, str, int]:
+    """Total order over the fields that identify a check, so output is byte-stable.
+
+    Keyed on the check's identity rather than its outcome: two rows differing only in
+    outcome are two different lookups and must not be able to swap places between runs.
+    """
+    return (
+        _ROLE_ORDER[check.role],
+        namespace_of(check.target),
+        str(name_of(check.target)),
+        str(version_of(check.target)),
+        SOURCE_IDS.index(check.source),
+    )

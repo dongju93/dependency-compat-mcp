@@ -176,6 +176,69 @@ async def test_check_output_schema_is_the_three_variant_sum_type(
     assert "verdict_evidence_ids" not in unknown["properties"]
     assert supported["properties"]["verdict_evidence_ids"]["minItems"] == 1
 
+    # Only the open verdict can name what left it open.
+    assert "decision_causes" in unknown["properties"]
+    assert "decision_causes" not in supported["properties"]
+    causes = schema["$defs"]["ConditionalClaimOut"]
+    # A cause's condition is the two-marker union, not the wider condition union: a
+    # conditional claim guarded by nothing in particular has no schema to express it.
+    assert causes["properties"]["condition"]["$ref"].endswith("MarkerGuardOut")
+    # The published enums are the domain's own closed sets, reached by $ref rather than
+    # restated in the model - so the schema cannot drift from what the server produces.
+    assert sorted(schema["$defs"]["GuardKind"]["enum"]) == [
+        "environment_marker",
+        "extra_marker",
+    ]
+    assert sorted(schema["$defs"]["UnprovenKind"]["enum"]) == [
+        "claim_outside_range",
+        "open_upper_bound",
+        "stale_lower_bound",
+        "tier_c_only",
+        "uncomparable_claim",
+    ]
+    assert (
+        schema["$defs"]["UnprovenClaimOut"]["properties"]["evidence_ids"]["minItems"]
+        == 1
+    )
+
+
+@pytest.mark.anyio
+async def test_a_source_check_names_the_release_it_was_made_for(
+    server: MCPServer,
+) -> None:
+    """Without the target, two lookups of one registry collapse into one unreadable row."""
+    async with Client(server) as client:
+        schema = _tool(
+            (await client.list_tools()).tools, "check_compatibility"
+        ).output_schema
+
+    check = schema["$defs"]["SourceCheckOut"]
+    for field in ("source", "target", "role", "required", "outcome"):
+        assert field in check["required"], field
+    assert sorted(schema["$defs"]["LookupRole"]["enum"]) == [
+        "declared_about",
+        "declaring",
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_context_constraint_publishes_its_condition(server: MCPServer) -> None:
+    async with Client(server) as client:
+        schema = _tool(
+            (await client.list_tools()).tools, "get_compatibility_context"
+        ).output_schema
+
+    constraint = schema["$defs"]["ConstraintOut"]
+    assert "condition" in constraint["required"]
+    condition = schema["$defs"]["ConditionOut"]
+    assert condition["discriminator"]["propertyName"] == "kind"
+    assert sorted(condition["discriminator"]["mapping"]) == [
+        "decided_marker",
+        "environment_marker",
+        "extra_marker",
+        "unconditional",
+    ]
+
 
 @pytest.mark.anyio
 async def test_context_output_schema_is_the_two_variant_sum_type(
@@ -254,10 +317,11 @@ async def test_structured_output_is_returned_unwrapped(server: MCPServer) -> Non
     assert structured is not None
     assert structured["verdict"] == "supported"
     assert "result" not in structured
-    # The text block must be the same facts, not a second, looser telling of them.
+    # The text block must be the same facts, not a second, looser telling of them - so
+    # it is compared whole rather than sampled at one key.
     block = result.content[0]
     assert isinstance(block, TextContent)
-    assert json.loads(block.text)["verdict"] == "supported"
+    assert json.loads(block.text) == structured
 
 
 @pytest.mark.anyio

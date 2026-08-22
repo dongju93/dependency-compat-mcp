@@ -9,7 +9,13 @@ trace left for the caller.
 
 import pytest
 
-from dependency_compat_mcp.domain.claims import MarkerDecidability, analyse_marker
+from dependency_compat_mcp.contracts.assembly import condition_out
+from dependency_compat_mcp.domain.claims import (
+    MarkerCondition,
+    MarkerDecidability,
+    analyse_marker,
+)
+from dependency_compat_mcp.domain.diagnostics import guard_of
 
 
 @pytest.mark.parametrize(
@@ -130,3 +136,72 @@ def test_decidability_is_always_one_of_the_four_declared_values() -> None:
 
     for expression in expressions:
         assert analyse_marker(expression).decidability in allowed
+
+
+def test_no_real_marker_analyses_as_decided() -> None:
+    """`always_true`/`always_false` are declared but unreachable from registry data.
+
+    Every PEP 508 marker names at least one variable from the closed list, which routes it
+    to `environment_dependent` before the constant-evaluation branch. An expression naming
+    none - `"a" == "a"` - is not the tautology it looks like: `packaging` reads one side as
+    an environment key, so evaluating it without an environment raises and the marker is
+    again reported undecidable.
+
+    This is pinned rather than left implicit because `condition_out` publishes a
+    `decided_marker` shape for these two values. If a future change to `analyse_marker`
+    makes them reachable, that shape starts appearing in responses, and this test is what
+    forces that to be a reviewed decision instead of a surprise in the contract.
+    """
+    reachable = {
+        analyse_marker(expression).decidability
+        for expression in (
+            'extra == "dev"',
+            'python_version < "3.11"',
+            'python_version >= "0"',
+            'sys_platform == "win32"',
+            "python_version == python_version",
+            '"a" == "a"',
+            '"3" < "4"',
+            "garbage",
+            "",
+        )
+    }
+    assert reachable == {"environment_dependent", "extra_guarded"}
+
+
+def test_a_decided_marker_projects_to_no_guard() -> None:
+    """A guard is a condition the server *cannot* settle, so a settled one is not a guard.
+
+    This is what keeps `ConditionalClaimOut.condition` honest: `conditional_claim` accepts
+    only the two undecidable kinds, and the projection is where that narrowing happens.
+    """
+    for decidability in ("always_true", "always_false"):
+        assert (
+            guard_of(MarkerCondition(expression="x", decidability=decidability)) is None
+        )
+    assert (
+        guard_of(MarkerCondition(expression="x", decidability="environment_dependent"))
+        is not None
+    )
+
+
+def test_condition_out_is_total_over_every_declared_decidability() -> None:
+    """The projection must answer for all four values, reachable or not."""
+    shapes = {
+        decidability: condition_out(
+            MarkerCondition(expression="x", decidability=decidability)
+        ).kind
+        for decidability in (
+            "always_true",
+            "always_false",
+            "environment_dependent",
+            "extra_guarded",
+        )
+    }
+    assert shapes == {
+        "always_true": "decided_marker",
+        "always_false": "decided_marker",
+        "environment_dependent": "environment_marker",
+        "extra_guarded": "extra_marker",
+    }
+    assert condition_out(None).kind == "unconditional"

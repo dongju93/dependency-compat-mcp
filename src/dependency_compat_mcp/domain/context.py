@@ -21,6 +21,7 @@ from dependency_compat_mcp.domain.claims import (
     Evidence,
     EvidenceId,
     Fetched,
+    MarkerCondition,
     NarrativeEvidence,
     SourceCheck,
     VersionConstraintEvidence,
@@ -60,12 +61,18 @@ type ContextUnknownReason = Literal[
 
 @dataclass(frozen=True, slots=True)
 class ContextConstraint:
-    """One declared or stated version relationship, with the sources it rests on."""
+    """One declared or stated version relationship, with the sources it rests on.
+
+    ``condition`` carries the declaration's own marker rather than leaving it to be read
+    out of ``explanation``. This tool never judges, so whether a constraint binds is a
+    question only the caller can answer - and it can only answer it from a field.
+    """
 
     relation: Literal["requires", "supports", "excludes"]
     counterpart: TargetId
     version_expression: str
     version_scheme: VersionScheme
+    condition: MarkerCondition | None
     explanation: str
     evidence_ids: tuple[EvidenceId, ...]
 

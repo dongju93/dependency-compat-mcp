@@ -15,6 +15,13 @@ from dependency_compat_mcp.domain.context import (
     ContextConstraint,
     ContextUnknown,
 )
+from dependency_compat_mcp.domain.diagnostics import (
+    CAUSE_KINDS,
+    ClaimGuard,
+    ConditionalClaim,
+    DecisionCause,
+    UnprovenClaim,
+)
 from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.evaluate import (
     CuratedCoverage,
@@ -65,10 +72,23 @@ EXPECTED_TEMPLATES: tuple[str, ...] = (
     "No relation rule is registered for {subject} and {counterpart} "
     "in an allowed direction.",
     "Explicit statements about {declared_about} disagree, so {declaring} was not judged.",
-    "{declaring} does not declare verified support for {declared_about}; "
-    "{limitation_count} limitation(s) recorded.",
     "No source relating {declaring} to {declared_about} was found.",
     "{declaring} declares no relationship to {declared_about}.",
+    "{declaring}'s requirement for {declared_about} is conditional on {expression}; "
+    "the request carries no environment, so compatibility is unknown.",
+    "{declaring}'s requirement for {declared_about} applies only when {expression} is "
+    "selected; the request selects no extra, so compatibility is unknown.",
+    "{declaring}'s {rule} has no upper bound and {declared_about} was released after it, "
+    "so support for it was never stated.",
+    "{declared_about} had already reached end of life when {declaring} was released, "
+    "so {declaring}'s {rule} never stated support for it.",
+    "{declaring} only enumerates {declared_about} in classifiers, "
+    "which cannot carry a verdict on their own.",
+    "{declaring}'s stated range does not cover {declared_about}, "
+    "so it neither includes nor excludes it.",
+    "{declaring}'s declared expression could not be compared with {declared_about} "
+    "under a single version scheme.",
+    " {additional_count} further cause(s) are listed in decision_causes.",
     " The arguments were read in reverse: the declaration comes from {declaring}.",
     "{target}: {constraint_count} constraint(s) and {change_count} change(s), "
     "all from registry metadata.",
@@ -143,7 +163,13 @@ def test_a_reversed_reading_is_disclosed() -> None:
 
 @pytest.mark.parametrize(
     "reason",
-    [reason for reason in UNKNOWN_REASONS if reason != "relation_not_supported"],
+    [
+        reason
+        for reason in UNKNOWN_REASONS
+        # Handled by the cause-specific tests below: it is the one reason that cannot be
+        # constructed without a cause, and the one whose sentence is chosen from one.
+        if reason not in ("relation_not_supported", "insufficient_evidence")
+    ],
 )
 def test_every_unknown_reason_has_a_summary(reason: UnknownReason) -> None:
     summary = summarise_verdict(
@@ -151,6 +177,95 @@ def test_every_unknown_reason_has_a_summary(reason: UnknownReason) -> None:
     )
     assert summary
     assert "{" not in summary
+
+
+# --------------------------------------------------------------------------------------
+# `insufficient_evidence` is narrated from its causes
+# --------------------------------------------------------------------------------------
+
+
+def _insufficient(*causes: DecisionCause) -> Unknown:
+    return Unknown(
+        reason="insufficient_evidence", notices=(), limitations=(), causes=causes
+    )
+
+
+def _unproven(kind: str) -> DecisionCause:
+    return UnprovenClaim(
+        kind=kind,  # pyrefly: ignore[bad-argument-type]
+        evidence_ids=("ev-1",),
+    )
+
+
+def _guarded(kind: str, expression: str, *variables: str) -> DecisionCause:
+    return ConditionalClaim(
+        condition=ClaimGuard(
+            kind=kind,  # pyrefly: ignore[bad-argument-type]
+            expression=expression,
+            variables=variables,
+        ),
+        evidence_ids=("ev-1",),
+    )
+
+
+@pytest.mark.parametrize("kind", CAUSE_KINDS)
+def test_every_cause_kind_has_a_summary(kind: str) -> None:
+    """A cause with no sentence would silently fall back to naming the category."""
+    cause = (
+        _guarded("environment_marker", 'sys_platform == "win32"', "sys_platform")
+        if kind == "conditional_claim"
+        else _unproven(kind)
+    )
+    summary = summarise_verdict(_insufficient(cause), PYTHON_RELATION)
+    assert summary
+    assert "{" not in summary
+
+
+def test_an_environment_marker_cause_quotes_the_marker() -> None:
+    summary = summarise_verdict(
+        _insufficient(
+            _guarded("environment_marker", 'sys_platform == "win32"', "sys_platform")
+        ),
+        PYTHON_RELATION,
+    )
+    assert summary == (
+        "pypi:example-framework 5.2's requirement for runtime:python 3.13 is conditional "
+        'on sys_platform == "win32"; the request carries no environment, so '
+        "compatibility is unknown."
+    )
+
+
+def test_an_extra_marker_cause_says_it_is_an_extra() -> None:
+    summary = summarise_verdict(
+        _insufficient(_guarded("extra_marker", 'extra == "argon2"', "extra")),
+        PYTHON_RELATION,
+    )
+    assert 'extra == "argon2"' in summary
+    assert "selects no extra" in summary
+
+
+def test_the_summary_narrates_the_first_cause_and_counts_the_rest() -> None:
+    """The leading cause is fixed by `CAUSE_KINDS`, so the sentence cannot drift."""
+    verdict = _insufficient(
+        _unproven("tier_c_only"),
+        _guarded("environment_marker", 'sys_platform == "win32"', "sys_platform"),
+    )
+    summary = summarise_verdict(verdict, PYTHON_RELATION)
+
+    assert verdict.causes[0] == _guarded(
+        "environment_marker", 'sys_platform == "win32"', "sys_platform"
+    )
+    assert summary.startswith(
+        "pypi:example-framework 5.2's requirement for runtime:python 3.13 is conditional"
+    )
+    assert summary.endswith(" 1 further cause(s) are listed in decision_causes.")
+
+
+def test_a_single_cause_gets_no_additional_clause() -> None:
+    summary = summarise_verdict(
+        _insufficient(_unproven("tier_c_only")), PYTHON_RELATION
+    )
+    assert "further cause" not in summary
 
 
 def test_an_unresolved_relation_gets_the_relation_not_supported_summary() -> None:
@@ -191,6 +306,7 @@ def _constraint() -> ContextConstraint:
         counterpart=PYTHON_ID,
         version_expression=">=3.10",
         version_scheme="pep440",
+        condition=None,
         explanation="The distribution requires this runtime range.",
         evidence_ids=("ev-1",),
     )
@@ -267,6 +383,7 @@ def _skeleton(summary: str) -> str:
         "pypi:example-library 2.0",
         "requires_python",
         "requires_dist",
+        'sys_platform == "win32"',
     ):
         summary = summary.replace(value, "*")
     return "".join("#" if character.isdigit() else character for character in summary)
@@ -283,9 +400,10 @@ def _template_skeletons() -> set[str]:
                 target="pypi:example-framework 5.2",
                 rule="requires_python",
                 evidence_count=0,
-                limitation_count=0,
                 constraint_count=0,
                 change_count=0,
+                additional_count=0,
+                expression='sys_platform == "win32"',
             )
         )
         for template in TEMPLATES
@@ -308,7 +426,14 @@ def test_every_generated_verdict_summary_instantiates_a_pinned_template() -> Non
                 relation=relation,
                 claims=(),
                 facts=release_facts,
-                lookups=(SourceCheck(source="pypi_json", outcome="ok"),),
+                lookups=(
+                    SourceCheck(
+                        source="pypi_json",
+                        target=FRAMEWORK,
+                        role="declaring",
+                        outcome="ok",
+                    ),
+                ),
                 curated=curated,
                 declaring_release_found=True,
                 declared_about_release_found=True,

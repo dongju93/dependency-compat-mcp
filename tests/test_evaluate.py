@@ -23,7 +23,16 @@ from dependency_compat_mcp.domain.claims import (
     SourceCheck,
     YankedInfo,
 )
-from dependency_compat_mcp.domain.diagnostics import Limitation, Notice
+from dependency_compat_mcp.domain.diagnostics import (
+    CAUSE_KINDS,
+    ClaimGuard,
+    ConditionalClaim,
+    Limitation,
+    Notice,
+    UnprovenClaim,
+    cause_evidence_ids,
+    cause_kind,
+)
 from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.evaluate import (
     CuratedCoverage,
@@ -54,7 +63,27 @@ LIBRARY = parse_target("pypi", "example-library", "2.0")
 PYTHON = parse_target("runtime", "python", "3.13")
 
 FULLY_CURATED = CuratedCoverage(entry_present=True, verified_for_version=True)
-OK_LOOKUPS = (SourceCheck(source="pypi_json", outcome="ok"),)
+
+
+def check(
+    source: str,
+    outcome: str,
+    *,
+    target: Target = FRAMEWORK,
+    role: str = "declaring",
+    required: bool = True,
+) -> SourceCheck:
+    """A lookup record. Every check names the release it was made for."""
+    return SourceCheck(
+        source=source,  # pyrefly: ignore[bad-argument-type]
+        target=target,
+        role=role,  # pyrefly: ignore[bad-argument-type]
+        outcome=outcome,  # pyrefly: ignore[bad-argument-type]
+        required=required,
+    )
+
+
+OK_LOOKUPS = (check("pypi_json", "ok"),)
 
 
 def relation_of(subject: Target, counterpart: Target) -> ResolvedRelation:
@@ -173,6 +202,12 @@ def codes(verdict: Verdict) -> tuple[str, ...]:
     return tuple(limitation.code for limitation in verdict.limitations)
 
 
+def causes(verdict: Verdict) -> tuple[str, ...]:
+    """The cause kinds, in the order `summaries` reads them."""
+    assert isinstance(verdict, Unknown)
+    return tuple(cause_kind(cause) for cause in verdict.causes)
+
+
 # --------------------------------------------------------------------------------------
 # Step 0
 # --------------------------------------------------------------------------------------
@@ -182,7 +217,7 @@ def test_required_lookup_failure_outranks_a_missing_release() -> None:
     """A failed lookup must not be reported as "no such release" (03 step 0)."""
     verdict = evaluate(
         evaluation(
-            lookups=(SourceCheck(source="pypi_json", outcome="failed", required=True),),
+            lookups=(check("pypi_json", "failed"),),
             declaring_release_found=False,
         )
     )
@@ -193,9 +228,7 @@ def test_optional_lookup_failure_is_a_limitation_not_a_verdict() -> None:
     verdict = evaluate(
         evaluation(
             gate(),
-            lookups=(
-                SourceCheck(source="curated_pack", outcome="failed", required=False),
-            ),
+            lookups=(check("curated_pack", "failed", required=False),),
         )
     )
     assert isinstance(verdict, Supported)
@@ -206,9 +239,7 @@ def test_skipped_required_lookup_is_a_limitation() -> None:
     verdict = evaluate(
         evaluation(
             gate(),
-            lookups=(
-                SourceCheck(source="curated_pack", outcome="skipped", required=True),
-            ),
+            lookups=(check("curated_pack", "skipped"),),
         )
     )
     assert codes(verdict) == ("source_unavailable",)
@@ -385,7 +416,11 @@ def test_open_upper_bound_over_a_newer_counterpart_is_unknown() -> None:
     )
     assert isinstance(verdict, Unknown)
     assert verdict.reason == "insufficient_evidence"
-    assert codes(verdict) == ("open_upper_bound",)
+    # The cause cites the very gate whose range was open, so the caller can read it.
+    assert verdict.causes == (
+        UnprovenClaim(kind="open_upper_bound", evidence_ids=("ev-gate",)),
+    )
+    assert codes(verdict) == ()
 
 
 def test_open_upper_bound_with_corroboration_is_supported() -> None:
@@ -423,7 +458,10 @@ def test_counterpart_already_eol_at_release_time_is_unknown() -> None:
         )
     )
     assert isinstance(verdict, Unknown)
-    assert codes(verdict) == ("stale_lower_bound",)
+    assert verdict.causes == (
+        UnprovenClaim(kind="stale_lower_bound", evidence_ids=("ev-gate",)),
+    )
+    assert codes(verdict) == ()
 
 
 def test_eol_counterpart_with_corroboration_is_supported() -> None:
@@ -493,13 +531,21 @@ def test_corroboration_alone_is_never_supported() -> None:
     verdict = evaluate(evaluation(corroboration("3.13")))
     assert isinstance(verdict, Unknown)
     assert verdict.reason == "insufficient_evidence"
-    assert codes(verdict) == ("tier_c_only",)
+    assert verdict.causes == (
+        UnprovenClaim(kind="tier_c_only", evidence_ids=("ev-corroboration",)),
+    )
+    assert codes(verdict) == ()
 
 
 def test_indeterminate_only_is_insufficient_evidence() -> None:
     verdict = evaluate(evaluation(gate("^3.10.0", scheme="semver")))
     assert isinstance(verdict, Unknown)
     assert verdict.reason == "insufficient_evidence"
+    # A semver range against a PEP 440 version is never compared, so the cause says the
+    # claim could not be read rather than that it excluded anything.
+    assert verdict.causes == (
+        UnprovenClaim(kind="uncomparable_claim", evidence_ids=("ev-gate",)),
+    )
 
 
 def test_no_claims_on_a_dependency_rule_is_no_declared_relationship() -> None:
@@ -583,17 +629,17 @@ def test_limitations_are_ordered_by_the_declared_code_order() -> None:
             gate(">=3.10", condition=marker("environment_dependent")),
             corroboration("3.13"),
             curated=CuratedCoverage(entry_present=False, verified_for_version=False),
-            lookups=(
-                SourceCheck(source="curated_pack", outcome="failed", required=False),
-            ),
+            lookups=(check("curated_pack", "failed", required=False),),
         )
     )
     assert codes(verdict) == (
-        "tier_c_only",
         "curated_pack_missing",
         "marker_guarded_claim",
         "source_unavailable",
     )
+    # Coverage gaps and the reasons the verdict stayed open are reported apart: neither
+    # list restates the other, and only the second cites evidence.
+    assert causes(verdict) == ("conditional_claim", "tier_c_only")
 
 
 # --------------------------------------------------------------------------------------
@@ -622,6 +668,102 @@ def test_a_verdict_cannot_be_built_without_evidence() -> None:
         Unsupported(verdict_evidence_ids=(), notices=(), limitations=())
 
 
+def test_a_cause_cannot_be_built_without_evidence() -> None:
+    """Same rule as a verdict: the field exists to hand the caller something to read.
+
+    Enforced in the domain rather than only by the response model's `minItems`, so an
+    unevidenced cause is an impossible value instead of a serialisation failure.
+    """
+    with pytest.raises(InvariantViolation, match="must cite an evidence id"):
+        UnprovenClaim(kind="tier_c_only", evidence_ids=())
+    with pytest.raises(InvariantViolation, match="must cite an evidence id"):
+        ConditionalClaim(
+            condition=ClaimGuard(
+                kind="extra_marker", expression='extra == "dev"', variables=("extra",)
+            ),
+            evidence_ids=(),
+        )
+
+
+def test_insufficient_evidence_cannot_be_built_without_a_cause() -> None:
+    """The one reason that is a category rather than a fact must say which fact it is."""
+    with pytest.raises(InvariantViolation, match="decision causes"):
+        Unknown(reason="insufficient_evidence", notices=(), limitations=())
+
+
+def test_no_other_reason_may_carry_a_cause() -> None:
+    """`lookup_failed` and friends already name their own cause; a second one would
+    invite the caller to read a claim the server never made."""
+    with pytest.raises(InvariantViolation, match="decision causes"):
+        Unknown(
+            reason="lookup_failed",
+            notices=(),
+            limitations=(),
+            causes=(UnprovenClaim(kind="tier_c_only", evidence_ids=("ev-1",)),),
+        )
+
+
+def test_causes_are_ordered_by_the_type_not_by_the_caller() -> None:
+    """`summaries` narrates `causes[0]`, so the order cannot depend on construction site."""
+    verdict = Unknown(
+        reason="insufficient_evidence",
+        notices=(),
+        limitations=(),
+        causes=(
+            UnprovenClaim(kind="uncomparable_claim", evidence_ids=("ev-2",)),
+            ConditionalClaim(
+                condition=ClaimGuard(
+                    kind="environment_marker",
+                    expression='sys_platform == "win32"',
+                    variables=("sys_platform",),
+                ),
+                evidence_ids=("ev-1",),
+            ),
+        ),
+    )
+    assert causes(verdict) == ("conditional_claim", "uncomparable_claim")
+
+
+def test_causes_sharing_an_identity_are_merged_and_keep_every_source() -> None:
+    verdict = Unknown(
+        reason="insufficient_evidence",
+        notices=(),
+        limitations=(),
+        causes=(
+            UnprovenClaim(kind="tier_c_only", evidence_ids=("ev-1",)),
+            UnprovenClaim(kind="tier_c_only", evidence_ids=("ev-2",)),
+        ),
+    )
+    assert verdict.causes == (
+        UnprovenClaim(kind="tier_c_only", evidence_ids=("ev-1", "ev-2")),
+    )
+
+
+def test_two_different_markers_stay_two_causes() -> None:
+    """Merging them by kind would hide one of the two conditions from the caller."""
+
+    def guarded(expression: str, variable: str, evidence: str) -> ConditionalClaim:
+        return ConditionalClaim(
+            condition=ClaimGuard(
+                kind="environment_marker",
+                expression=expression,
+                variables=(variable,),
+            ),
+            evidence_ids=(evidence,),
+        )
+
+    verdict = Unknown(
+        reason="insufficient_evidence",
+        notices=(),
+        limitations=(),
+        causes=(
+            guarded('sys_platform == "win32"', "sys_platform", "ev-1"),
+            guarded('python_version < "3.11"', "python_version", "ev-2"),
+        ),
+    )
+    assert len(verdict.causes) == 2
+
+
 # --------------------------------------------------------------------------------------
 # Properties
 # --------------------------------------------------------------------------------------
@@ -636,6 +778,7 @@ _CLAIM_SETS: tuple[tuple[str, ...], ...] = (
     ("gate_dead",),
     ("gate_semver",),
     ("supports",),
+    ("supports_other",),
     ("excludes",),
     ("corroborates",),
     ("gate_ok", "supports"),
@@ -644,6 +787,9 @@ _CLAIM_SETS: tuple[tuple[str, ...], ...] = (
     ("gate_open", "supports"),
     ("supports", "excludes"),
     ("corroborates", "gate_marker"),
+    # Two claims that each decide nothing, for a differently-shaped pair of causes than
+    # the marker/tier-C combination above.
+    ("supports_other", "corroborates"),
     ("gate_ok", "excludes"),
 )
 
@@ -660,9 +806,9 @@ _FACT_SETS: tuple[ReleaseFacts, ...] = (
 
 _LOOKUP_SETS: tuple[tuple[SourceCheck, ...], ...] = (
     OK_LOOKUPS,
-    (SourceCheck(source="pypi_json", outcome="failed", required=True),),
-    (SourceCheck(source="curated_pack", outcome="failed", required=False),),
-    (SourceCheck(source="curated_pack", outcome="skipped", required=True),),
+    (check("pypi_json", "failed"),),
+    (check("curated_pack", "failed", required=False),),
+    (check("curated_pack", "skipped"),),
 )
 
 _CURATED_SETS: tuple[CuratedCoverage, ...] = (
@@ -723,6 +869,13 @@ def _claim(kind: str, about: Target) -> Claim:
         case "supports":
             return statement(
                 "supports", admitted, about=about, evidence_id="ev-supports"
+            )
+        case "supports_other":
+            # A range the author really did write, about some *other* release. Reading it
+            # as an exclusion of this one would be absence-as-evidence, so it decides
+            # nothing - and that is a distinct reason from "could not be compared at all".
+            return statement(
+                "supports", rejected, about=about, evidence_id="ev-supports-other"
             )
         case "excludes":
             return statement(
@@ -811,3 +964,53 @@ def test_notice_evidence_ids_come_from_the_claims() -> None:
         claimed = {claim.evidence_id for claim in evaluation_input.claims}
         for notice in evaluate(evaluation_input).notices:
             assert set(notice.evidence_ids) <= claimed
+
+
+def test_every_insufficient_evidence_verdict_names_a_cause() -> None:
+    """The property that matters, stated over the whole corpus rather than an example.
+
+    `insufficient_evidence` is the one reason whose name is a category, so it is the one
+    that can degenerate into "unknown, and the server will not say why". Asserting it here
+    - across every generated combination of claims, facts, lookups, coverage and relation -
+    is what makes it a general guarantee rather than a property of the cases someone
+    happened to try.
+    """
+    considered = 0
+    for evaluation_input in GENERATED:
+        verdict = evaluate(evaluation_input)
+        if not isinstance(verdict, Unknown):
+            continue
+        if verdict.reason == "insufficient_evidence":
+            considered += 1
+            assert verdict.causes, evaluation_input
+        else:
+            # And the converse: a reason that already names its own cause carries none.
+            assert not verdict.causes, evaluation_input
+    assert considered > 0
+
+
+def test_every_cause_evidence_id_comes_from_the_claims() -> None:
+    """A cause must point at something the caller can actually go and read."""
+    for evaluation_input in GENERATED:
+        verdict = evaluate(evaluation_input)
+        if not isinstance(verdict, Unknown):
+            continue
+        claimed = {claim.evidence_id for claim in evaluation_input.claims}
+        for cause in verdict.causes:
+            assert cause_evidence_ids(cause)
+            assert set(cause_evidence_ids(cause)) <= claimed, evaluation_input
+
+
+def test_every_produced_cause_kind_is_reachable_from_the_corpus() -> None:
+    """Guards against a cause kind that exists only to make one example read well.
+
+    A kind the decision procedure cannot produce is dead weight in a closed set the caller
+    is told to branch on, so the set is asserted against what 6k generated inputs actually
+    yield rather than against the list itself.
+    """
+    produced = {
+        cause_kind(cause)
+        for evaluation_input in GENERATED
+        for cause in getattr(evaluate(evaluation_input), "causes", ())
+    }
+    assert produced == set(CAUSE_KINDS), set(CAUSE_KINDS) - produced

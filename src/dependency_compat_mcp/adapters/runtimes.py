@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime
 from typing import Literal, assert_never
 
 from dependency_compat_mcp.curated.loader import RuntimeRelease, RuntimeReleaseTable
-from dependency_compat_mcp.domain.claims import SourceCheck, SourceId
+from dependency_compat_mcp.domain.claims import LookupRole, SourceCheck, SourceId
 from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.targets import (
     ExactVersion,
@@ -123,15 +123,27 @@ class RuntimeReleaseAdapter:
             case _:
                 assert_never(target)
 
-    def source_check(self, target: Target, lookup: RuntimeReleaseLookup) -> SourceCheck:
+    def source_check(
+        self,
+        target: Target,
+        lookup: RuntimeReleaseLookup,
+        *,
+        role: LookupRole = "declaring",
+    ) -> SourceCheck:
         """The ``SourceCheck`` for a completed lookup.
 
         Derived from the lookup value the verdict was computed from, so what the server
-        reports it consulted and what it actually used cannot diverge (03 [3]).
+        reports it consulted and what it actually used cannot diverge (03 [3]). The check
+        names the target it was made for, so two lookups of the same table stay two rows.
         """
         match lookup:
             case RuntimeReleaseFound():
-                return SourceCheck(source=self.source_id_for(target), outcome="ok")
+                return SourceCheck(
+                    source=self.source_id_for(target),
+                    target=target,
+                    role=role,
+                    outcome="ok",
+                )
             case RuntimeReleaseMissing(reason="not_a_runtime"):
                 # No source id exists for this target, so nothing was opened. The caller
                 # simply omits this check; representing it would require inventing one.
@@ -141,6 +153,8 @@ class RuntimeReleaseAdapter:
             case RuntimeReleaseMissing():
                 return SourceCheck(
                     source=self.source_id_for(target),
+                    target=target,
+                    role=role,
                     outcome="not_found",
                     detail="version_not_in_snapshot",
                 )
