@@ -35,6 +35,9 @@ def test_the_package_root_exposes_main_without_importing_the_server() -> None:
 def test_defaults_match_the_transport_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PORT", raising=False)
     monkeypatch.delenv("MCP_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.delenv("K_REVISION", raising=False)
+    monkeypatch.delenv("K_CONFIGURATION", raising=False)
     parsed = _build_parser().parse_args([])
     assert parsed.transport == "stdio"
     # 01: bind to loopback unless a deployment boundary says otherwise.
@@ -43,7 +46,7 @@ def test_defaults_match_the_transport_contract(monkeypatch: pytest.MonkeyPatch) 
     assert MAX_REQUEST_BODY_BYTES == 4 * 1024 * 1024
 
 
-def test_cloud_run_environment_is_parsed_at_the_cli_boundary(
+def test_explicit_public_url_is_parsed_at_the_cli_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PORT", "8080")
@@ -55,6 +58,40 @@ def test_cloud_run_environment_is_parsed_at_the_cli_boundary(
     assert parsed.port == 8080
     assert security.allowed_hosts == ["dependency-compat.example.com"]
     assert security.allowed_origins == ["https://dependency-compat.example.com"]
+
+
+def test_cloud_run_environment_selects_public_binding_without_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PORT", "8080")
+    monkeypatch.delenv("MCP_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("K_SERVICE", "dependency-compat-mcp")
+    monkeypatch.setenv("K_REVISION", "dependency-compat-mcp-00001")
+    monkeypatch.setenv("K_CONFIGURATION", "dependency-compat-mcp")
+
+    parsed = _build_parser().parse_args(["--transport", "http"])
+    security = _transport_security(parsed)
+
+    assert parsed.host == "0.0.0.0"
+    assert parsed.port == 8080
+    assert parsed.deployment_runtime == "cloud_run"
+    assert not security.enable_dns_rebinding_protection
+
+
+def test_partial_cloud_run_identity_cannot_disable_local_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MCP_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("K_SERVICE", "dependency-compat-mcp")
+    monkeypatch.delenv("K_REVISION", raising=False)
+    monkeypatch.delenv("K_CONFIGURATION", raising=False)
+
+    parsed = _build_parser().parse_args(["--transport", "http"])
+    security = _transport_security(parsed)
+
+    assert parsed.host == "127.0.0.1"
+    assert parsed.deployment_runtime == "local"
+    assert security.enable_dns_rebinding_protection
 
 
 def test_default_https_port_is_canonicalized_for_proxy_headers() -> None:

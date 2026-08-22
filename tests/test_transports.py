@@ -462,3 +462,39 @@ async def test_http_accepts_the_configured_cloud_run_host_and_origin(
         )
 
     assert response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_http_accepts_cloud_run_ingress_without_manual_public_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PORT", "8080")
+    monkeypatch.delenv("MCP_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("K_SERVICE", "dependency-compat-mcp")
+    monkeypatch.setenv("K_REVISION", "dependency-compat-mcp-00001")
+    monkeypatch.setenv("K_CONFIGURATION", "dependency-compat-mcp")
+    args = _build_parser().parse_args(["--transport", "http"])
+    service = build_service(FakeFetcher(payloads=DJANGO_PAYLOADS))
+    app = build_server(service).streamable_http_app(
+        streamable_http_path="/mcp",
+        stateless_http=True,
+        json_response=True,
+        transport_security=_transport_security(args),
+    )
+
+    async with (
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="https://dependency-compat-abc.a.run.app",
+        ) as client,
+        app.router.lifespan_context(app),
+    ):
+        response = await client.post(
+            "/mcp",
+            headers=_headers(
+                "tools/list", Origin="https://dependency-compat-abc.a.run.app"
+            ),
+            json=_body(9, "tools/list"),
+        )
+
+    assert response.status_code == 200

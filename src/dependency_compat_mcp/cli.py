@@ -21,7 +21,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 from urllib.parse import urlsplit
 
 from mcp.server import MCPServer
@@ -54,6 +54,17 @@ class _PublicBaseUrl:
 
     origin: str
     authority: str
+
+
+type _DeploymentRuntime = Literal["local", "cloud_run"]
+
+
+def _deployment_runtime() -> _DeploymentRuntime:
+    """Recognise Cloud Run only from the complete platform-provided identity."""
+    cloud_run_identity = ("K_SERVICE", "K_REVISION", "K_CONFIGURATION")
+    if all(os.environ.get(name) for name in cloud_run_identity):
+        return "cloud_run"
+    return "local"
 
 
 def _parse_port(value: str) -> int:
@@ -120,6 +131,13 @@ def _transport_security(args: argparse.Namespace) -> TransportSecuritySettings:
             allowed_hosts=[public_base_url.authority],
             allowed_origins=[public_base_url.origin],
         )
+    if args.deployment_runtime == "cloud_run":
+        # Cloud Run terminates TLS and validates the public ingress host before the
+        # request reaches this container. Its runtime contract does not expose the
+        # generated service URL, so exact application-level allowlisting is impossible
+        # without an operator-supplied value. Trust only the structurally recognised
+        # Cloud Run boundary; local and other deployments keep the defence enabled.
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[f"{args.host}:{args.port}", args.host],
@@ -148,6 +166,7 @@ def build_service(
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    deployment_runtime = _deployment_runtime()
     parser = argparse.ArgumentParser(
         prog="dependency-compat-mcp",
         description=(
@@ -163,10 +182,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
+        default="0.0.0.0" if deployment_runtime == "cloud_run" else "127.0.0.1",
         help=(
-            "Bind address for --transport http. Defaults to loopback; exposing the server "
-            "requires TLS and the MCP authorization spec at a trusted deployment boundary."
+            "Bind address for --transport http. Defaults to Cloud Run's public bind "
+            "address when detected, otherwise loopback."
         ),
     )
     parser.add_argument(
@@ -189,6 +208,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
     )
+    parser.set_defaults(deployment_runtime=deployment_runtime)
     return parser
 
 
@@ -216,8 +236,8 @@ async def _serve(
                 # capabilities, and nothing about a verdict belongs to a connection.
                 stateless_http=True,
                 max_request_body_size=MAX_REQUEST_BODY_BYTES,
-                # 01: Origin/Host validation and DNS-rebinding defence belong at the
-                # deployment boundary, and the server refuses to run without them.
+                # 01: Origin/Host validation and DNS-rebinding defence stay in-process
+                # except when the structurally detected Cloud Run ingress owns them.
                 transport_security=_transport_security(args),
             )
     finally:
