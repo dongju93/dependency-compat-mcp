@@ -40,6 +40,7 @@ from mcp_types import (
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import ValidationError
 
+from dependency_compat_mcp import __version__
 from dependency_compat_mcp.contracts.inputs import TargetInput
 from dependency_compat_mcp.contracts.outputs import (
     CheckCompatibilityResult,
@@ -66,7 +67,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 SERVER_NAME: Final = "dependency-compat-mcp"
-SERVER_VERSION: Final = "0.1.0"
+SERVER_VERSION: Final = __version__
 
 # The one revision this server implements (01). Written out rather than read from the SDK
 # so a release that widens `MODERN_PROTOCOL_VERSIONS` cannot quietly widen what this server
