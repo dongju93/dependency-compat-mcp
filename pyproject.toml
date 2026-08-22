@@ -1,15 +1,42 @@
 [project]
 name = "dependency-compat-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server answering whether two exact package or runtime versions work together, with sources"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "dongju93", email = "spdlqj011@gmail.com" }]
 requires-python = ">=3.14"
-dependencies = [
-    "mcp>=2.0.0",
-    "node-semver>=0.9.1",
-    "packaging>=26.3",
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "compatibility",
+    "dependencies",
+    "pypi",
+    "npm",
+    "packaging",
+    "semver",
+    "version-compatibility",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: System :: Software Distribution",
+]
+dependencies = ["mcp>=2.0.0", "node-semver>=0.9.1", "packaging>=26.3"]
+
+[project.urls]
+Homepage = "https://github.com/dongju93/dependency-compat-mcp"
+Repository = "https://github.com/dongju93/dependency-compat-mcp"
+Issues = "https://github.com/dongju93/dependency-compat-mcp/issues"
+Changelog = "https://github.com/dongju93/dependency-compat-mcp/releases"
 
 [project.scripts]
 dependency-compat-mcp = "dependency_compat_mcp:main"
