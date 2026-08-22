@@ -30,7 +30,10 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Topic :: System :: Software Distribution",
 ]
-dependencies = ["mcp>=2.0.0", "node-semver>=0.9.1", "packaging>=26.3"]
+# The MCP cap is a contract, not caution: `server.py` asserts that the SDK's
+# `MODERN_PROTOCOL_VERSIONS` is exactly `PROTOCOL_VERSION`, so a minor SDK release that
+# widens it must be adopted deliberately here rather than by an installer's resolution.
+dependencies = ["mcp>=2.0.0,<2.1", "node-semver>=0.9.1", "packaging>=26.3"]
 
 [project.urls]
 Homepage = "https://github.com/dongju93/dependency-compat-mcp"
@@ -46,7 +49,7 @@ requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["mcp[cli]>=2.0.0", "pytest-cov>=7.1.0"]
+dev = ["mcp[cli]>=2.0.0,<2.1", "pytest-cov>=7.1.0"]
 
 [tool.ruff]
 extend-exclude = ["docs"]
