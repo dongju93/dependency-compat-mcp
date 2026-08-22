@@ -15,6 +15,7 @@ from mcp.server import MCPServer
 from mcp_types import TextContent
 
 from dependency_compat_mcp.descriptions import (
+    ARGUMENT_DESCRIPTIONS,
     CHECK_COMPATIBILITY_DESCRIPTION,
     GET_COMPATIBILITY_CONTEXT_DESCRIPTION,
     REQUIRED_ELEMENTS,
@@ -40,6 +41,18 @@ def _resolve(schema: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
     while "$ref" in node:
         node = schema["$defs"][node["$ref"].rsplit("/", 1)[-1]]
     return node
+
+
+def _refs(node: Any) -> Any:
+    """Every ``$ref`` reachable from ``node``, so "there is none" can be asserted."""
+    if isinstance(node, dict):
+        if isinstance(node.get("$ref"), str):
+            yield node["$ref"]
+        for value in node.values():
+            yield from _refs(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _refs(value)
 
 
 # --------------------------------------------------------------------------------------
@@ -142,6 +155,47 @@ async def test_input_schema_matches_02(
         assert target["properties"]["version"]["maxLength"] == 100
         for field in ("namespace", "name", "version"):
             assert target["properties"][field]["minLength"] == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("check_compatibility", ["subject", "counterpart"]),
+        ("get_compatibility_context", ["target"]),
+    ],
+)
+async def test_every_argument_describes_itself_without_ref_resolution(
+    server: MCPServer, tool_name: str, arguments: list[str]
+) -> None:
+    """01: a caller may not resolve ``$ref``, so nothing it needs may hide behind one.
+
+    Pydantic publishes a model-typed argument as a bare reference, which leaves the
+    property with no ``type`` and no ``description`` at all - a client rendering the
+    parameter list has literally nothing to show. The type and the argument's role have to
+    be on the property itself.
+    """
+    async with Client(server) as client:
+        schema = _tool((await client.list_tools()).tools, tool_name).input_schema
+
+    assert next(_refs(schema), None) is None, "no $ref survives in the input schema"
+    assert "$defs" not in schema, "$defs is dead once every argument is inlined"
+
+    for argument in arguments:
+        published = schema["properties"][argument]
+        assert published["type"] == "object"
+        # The role, not the shared model docstring: the two sides must read differently.
+        assert published["description"] == ARGUMENT_DESCRIPTIONS[tool_name][argument]
+        # The fields keep their own constraints and text through the inlining.
+        for field in ("namespace", "name", "version"):
+            assert published["properties"][field]["type"] == "string"
+            assert published["properties"][field]["description"]
+
+    if len(arguments) == 2:
+        subject, counterpart = (schema["properties"][name] for name in arguments)
+        assert subject["description"] != counterpart["description"]
+        # Inlined copies, not one shared node: editing one must not edit the other.
+        assert subject["properties"] is not counterpart["properties"]
 
 
 @pytest.mark.anyio

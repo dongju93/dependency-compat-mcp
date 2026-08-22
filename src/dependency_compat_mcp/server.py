@@ -17,6 +17,10 @@ Three things here are not defaults and are worth the reading time:
   nested models but builds the top-level arguments model itself, so the check lives in an
   always-executed middleware rather than in a schema the SDK would overwrite. The advertised
   ``inputSchema`` is patched to match, so ``tools/list`` and runtime behaviour agree.
+* **Nothing load-bearing sits behind a ``$ref``.** Pydantic publishes a model-typed argument
+  and a ``RootModel`` result as a bare reference into ``$defs``. A client that does not
+  dereference then sees an argument with no type and a result with no discriminator, so both
+  are hoisted into place before the schema is advertised.
 * **``unknown`` never travels as an error.** Only contract violations and broken server
   invariants become ``ToolError``; a request the server could not answer comes back as a
   perfectly ordinary structured result.
@@ -25,6 +29,7 @@ Three things here are not defaults and are worth the reading time:
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from typing import Any, Final
 
 from mcp import MCPError
@@ -47,6 +52,7 @@ from dependency_compat_mcp.contracts.outputs import (
     GetCompatibilityContextResult,
 )
 from dependency_compat_mcp.descriptions import (
+    ARGUMENT_DESCRIPTIONS,
     CHECK_COMPATIBILITY_DESCRIPTION,
     GET_COMPATIBILITY_CONTEXT_DESCRIPTION,
     SERVER_INSTRUCTIONS,
@@ -201,6 +207,80 @@ def _close_input_schema(server: MCPServer, tool_name: str) -> None:
     tool.parameters["additionalProperties"] = False
 
 
+def _references(node: object) -> Iterator[str]:
+    """Every ``$ref`` string reachable from ``node``, at any depth."""
+    if isinstance(node, dict):
+        reference = node.get("$ref")
+        if isinstance(reference, str):
+            yield reference
+        for value in node.values():
+            yield from _references(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _references(value)
+
+
+def _inline_argument_refs(server: MCPServer, tool_name: str) -> None:
+    """Publish each argument's object schema in place of its ``$ref``.
+
+    A model-typed parameter makes pydantic emit ``{"$ref": "#/$defs/TargetInput"}`` as the
+    *entire* property. That is valid JSON Schema, but the property then carries no ``type``
+    and no ``description``, so a client that does not dereference has nothing to show for
+    the argument - which is how a tool inspector ends up rendering it as untyped and
+    undocumented. This is the input-side of the move :func:`_inline_root_ref` already makes
+    on the output side, for the same reason 01 gives: a caller may not implement ``$ref``
+    resolution, so nothing load-bearing may sit behind one.
+
+    Inlining is also the only place the per-argument text can live. Every argument of both
+    tools is a ``TargetInput``, so the model's own description reads identically in every
+    position and cannot say which side of the question an argument is - the one thing the
+    ``pypi -> pypi`` and ``npm -> npm`` rules make it possible to get wrong.
+
+    Validation is unaffected: the SDK checks arguments against the pydantic model, not
+    against this document, exactly as :func:`_close_input_schema` already relies on.
+    """
+    tool = server._tool_manager.get_tool(tool_name)
+    if tool is None:  # pragma: no cover - registration just happened
+        raise InvariantViolation(f"tool {tool_name!r} was not registered")
+    schema = tool.parameters
+    definitions = schema.get("$defs", {})
+    properties = schema.get("properties", {})
+    descriptions = ARGUMENT_DESCRIPTIONS[tool_name]
+
+    for argument, node in properties.items():
+        text = descriptions.get(argument)
+        if text is None:  # pragma: no cover - a test pins both dicts to one key set
+            raise InvariantViolation(
+                f"argument {argument!r} of {tool_name!r} has no published description"
+            )
+        reference = node.get("$ref") if isinstance(node, dict) else None
+        if not isinstance(reference, str):
+            # Already a self-describing node; it still needs the per-argument text.
+            node["description"] = text
+            continue
+        name = reference.rsplit("/", 1)[-1]
+        definition = definitions.get(name)
+        if not isinstance(definition, dict):  # pragma: no cover - pydantic emits it
+            raise InvariantViolation(
+                f"input schema of {tool_name!r} has a dangling $ref for {argument!r}"
+            )
+        # Copy, because the same definition backs every argument once `$defs` is gone.
+        inlined = deepcopy(definition)
+        # `title` here is the model's Python name; the property key already names the
+        # argument, and a UI showing both says the wrong one louder.
+        inlined.pop("title", None)
+        # The argument's role outranks the type's generic docstring.
+        inlined["description"] = text
+        properties[argument] = inlined
+
+    # `$defs` existed only for the refs just removed. Dropping it once nothing outside it
+    # refers in keeps the published schema free of a section a reader must skip; a future
+    # nested `$ref` keeps it automatically.
+    live = {key: value for key, value in schema.items() if key != "$defs"}
+    if "$defs" in schema and next(_references(live), None) is None:
+        del schema["$defs"]
+
+
 def _inline_root_ref(server: MCPServer, tool_name: str) -> None:
     """Publish the output union at the root instead of behind a ``$ref``.
 
@@ -324,6 +404,7 @@ def build_server(service: CompatibilityService) -> MCPServer:
 
     for tool_name in TOOL_ARGUMENT_NAMES:
         _close_input_schema(server, tool_name)
+        _inline_argument_refs(server, tool_name)
         _inline_root_ref(server, tool_name)
     _withdraw_unimplemented_capabilities(server)
 

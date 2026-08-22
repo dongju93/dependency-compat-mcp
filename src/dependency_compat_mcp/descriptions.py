@@ -21,12 +21,18 @@ decision).
 
 :data:`REQUIRED_ELEMENTS` exists so that "all four elements are present, in order" is a
 machine-checked property instead of a review convention.
+
+:data:`ARGUMENT_DESCRIPTIONS` carries the same idea one level down. Both tools take the
+same argument type, so the type's own docstring cannot say which side of the question an
+argument occupies; only per-argument text can, and it is published on the argument's
+schema node rather than left to a caller who may never read the tool description in full.
 """
 
 from dataclasses import dataclass
 from typing import Final, Literal
 
 __all__ = [
+    "ARGUMENT_DESCRIPTIONS",
     "CHECK_COMPATIBILITY_DESCRIPTION",
     "GET_COMPATIBILITY_CONTEXT_DESCRIPTION",
     "REQUIRED_ELEMENTS",
@@ -80,6 +86,44 @@ GET_COMPATIBILITY_CONTEXT_DESCRIPTION: Final[str] = (
     "result: current evidence proves nothing here. Not an error and not a reason to "
     "retry: limitations and sources_checked carry the next thing to check."
 )
+
+
+# Per-argument text, published on the argument's own schema node by
+# `server._inline_argument_refs`.
+#
+# Every argument of both tools has the same type, so the model's own docstring says the
+# same thing in every position and cannot distinguish them. Element 3 of the tool
+# description states that argument order is meaning; these strings are where that meaning
+# is attached to the individual argument a caller is filling in. They repeat the rule
+# rather than referring to it, because a client that renders a parameter list may show
+# only this line.
+ARGUMENT_DESCRIPTIONS: Final[dict[str, dict[str, str]]] = {
+    "check_compatibility": {
+        "subject": (
+            "First side of the pair: one exact release, given as namespace, name and "
+            "version. Under the pypi -> pypi and npm -> npm rules this is the declaring "
+            "side, whose own metadata is read for a constraint on counterpart, so "
+            "swapping the two arguments asks a different question. Under the two runtime "
+            "rules the kind of target fixes the declaring side instead and either "
+            "position reads the same; relation.direction reports which reading was used."
+        ),
+        "counterpart": (
+            "Second side of the pair: one exact release, given as namespace, name and "
+            "version. Under the pypi -> pypi and npm -> npm rules this is the side the "
+            "subject's declaration is tested against, not a second question about its "
+            "own metadata. Under the two runtime rules the kind of target fixes the "
+            "declaring side, so either position reads the same."
+        ),
+    },
+    "get_compatibility_context": {
+        "target": (
+            "The one exact release whose declared constraints are returned, given as "
+            "namespace, name and version. Nothing is compared against it and no verdict "
+            "is reached, so there is no declaring side to choose and no argument order "
+            "to get wrong."
+        ),
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,11 +17,13 @@ from typing import Final
 import pytest
 
 from dependency_compat_mcp.descriptions import (
+    ARGUMENT_DESCRIPTIONS,
     CHECK_COMPATIBILITY_DESCRIPTION,
     GET_COMPATIBILITY_CONTEXT_DESCRIPTION,
     REQUIRED_ELEMENTS,
     SERVER_INSTRUCTIONS,
 )
+from dependency_compat_mcp.server import TOOL_ARGUMENT_NAMES
 
 TOOL_DESCRIPTIONS: Final[dict[str, str]] = {
     "check_compatibility": CHECK_COMPATIBILITY_DESCRIPTION,
@@ -204,3 +206,51 @@ def test_server_instructions_point_at_both_tools_and_keep_the_same_boundaries() 
     assert "unknown" in text
     assert "example" not in text
     assert "```" not in text
+
+
+# --------------------------------------------------------------------------------------
+# Per-argument text
+# --------------------------------------------------------------------------------------
+
+
+def test_every_accepted_argument_has_exactly_one_description() -> None:
+    """`TOOL_ARGUMENT_NAMES` is the single source of truth for what a tool accepts.
+
+    An argument missing here would be published with no text at all, and a stale entry
+    would describe an argument the middleware rejects.
+    """
+    assert {tool: set(text) for tool, text in ARGUMENT_DESCRIPTIONS.items()} == {
+        tool: set(names) for tool, names in TOOL_ARGUMENT_NAMES.items()
+    }
+
+
+def test_argument_descriptions_are_single_line_and_distinct() -> None:
+    """The two sides of a pair must not read the same, or order is undocumented."""
+    for tool, texts in ARGUMENT_DESCRIPTIONS.items():
+        assert len(set(texts.values())) == len(texts), tool
+        for name, text in texts.items():
+            assert "\n" not in text, (tool, name)
+            assert text == text.strip(), (tool, name)
+
+
+def test_each_argument_says_it_takes_one_exact_release() -> None:
+    """The most common misuse is passing a range; every argument states the rule itself.
+
+    A caller filling in one field may never have read the tool description in full.
+    """
+    for tool, texts in ARGUMENT_DESCRIPTIONS.items():
+        for name, text in texts.items():
+            lowered = text.lower()
+            assert "exact release" in lowered, (tool, name)
+            assert "namespace, name and version" in lowered, (tool, name)
+
+
+def test_the_pair_names_the_declaring_side_and_the_single_argument_denies_it() -> None:
+    """The asymmetry of 02, stated where the argument is filled in rather than only above."""
+    pair = ARGUMENT_DESCRIPTIONS["check_compatibility"]
+    for text in pair.values():
+        assert "declaring side" in text.lower()
+    assert "swapping the two arguments asks a different question" in pair["subject"]
+
+    single = ARGUMENT_DESCRIPTIONS["get_compatibility_context"]["target"].lower()
+    assert "no argument order" in single

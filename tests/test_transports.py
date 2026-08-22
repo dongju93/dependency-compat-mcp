@@ -20,6 +20,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
 from dependency_compat_mcp.cli import _build_parser, _transport_security
+from dependency_compat_mcp.descriptions import ARGUMENT_DESCRIPTIONS
 from dependency_compat_mcp.server import build_server
 from tests.conftest import FakeFetcher, build_service, pypi_release, pypi_url
 
@@ -172,6 +173,27 @@ def test_stdio_lists_both_tools_over_the_wire(stdio_probe: StdioProbe) -> None:
         # The wire schema requires this and the in-memory path never checks it.
         assert tool["outputSchema"]["type"] == "object"
         assert tool["inputSchema"]["additionalProperties"] is False
+
+
+@pytest.mark.slow
+def test_stdio_publishes_every_argument_with_a_type_and_a_description(
+    stdio_probe: StdioProbe,
+) -> None:
+    """What a real client renders for an argument, checked on the wire that carries it.
+
+    A model-typed argument is published by pydantic as a bare ``$ref``, which a client that
+    does not dereference shows as an untyped, undocumented parameter. The in-memory client
+    hands back the same dict either way, so only this probe distinguishes the two.
+    """
+    response = stdio_probe.request(4, "tools/list")
+
+    for tool in response["result"]["tools"]:
+        schema = tool["inputSchema"]
+        assert "$defs" not in schema
+        for argument, node in schema["properties"].items():
+            assert node["type"] == "object"
+            assert node["description"] == ARGUMENT_DESCRIPTIONS[tool["name"]][argument]
+            assert sorted(node["properties"]) == ["name", "namespace", "version"]
 
 
 @pytest.mark.slow
