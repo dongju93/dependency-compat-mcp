@@ -14,6 +14,7 @@ from dependency_compat_mcp.cli import (
     MAX_REQUEST_BODY_BYTES,
     STREAMABLE_HTTP_PATH,
     _build_parser,
+    _transport_security,
     build_service,
 )
 from dependency_compat_mcp.curated.loader import PackLoadError
@@ -31,13 +32,73 @@ def test_the_package_root_exposes_main_without_importing_the_server() -> None:
     assert callable(package_main)
 
 
-def test_defaults_match_the_transport_contract() -> None:
+def test_defaults_match_the_transport_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.delenv("MCP_PUBLIC_BASE_URL", raising=False)
     parsed = _build_parser().parse_args([])
     assert parsed.transport == "stdio"
     # 01: bind to loopback unless a deployment boundary says otherwise.
     assert parsed.host == "127.0.0.1"
     assert STREAMABLE_HTTP_PATH == "/mcp"
     assert MAX_REQUEST_BODY_BYTES == 4 * 1024 * 1024
+
+
+def test_cloud_run_environment_is_parsed_at_the_cli_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PORT", "8080")
+    monkeypatch.setenv("MCP_PUBLIC_BASE_URL", "https://Dependency-Compat.Example.com/")
+
+    parsed = _build_parser().parse_args(["--transport", "http", "--host", "0.0.0.0"])
+    security = _transport_security(parsed)
+
+    assert parsed.port == 8080
+    assert security.allowed_hosts == ["dependency-compat.example.com"]
+    assert security.allowed_origins == ["https://dependency-compat.example.com"]
+
+
+def test_default_https_port_is_canonicalized_for_proxy_headers() -> None:
+    parsed = _build_parser().parse_args(
+        ["--public-base-url", "https://mcp.example.com:443"]
+    )
+    security = _transport_security(parsed)
+
+    assert security.allowed_hosts == ["mcp.example.com"]
+    assert security.allowed_origins == ["https://mcp.example.com"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0", "65536", "not-a-port"],
+)
+def test_invalid_cloud_run_port_fails_at_start_up(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("PORT", value)
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://mcp.example.com",
+        "https://user@mcp.example.com",
+        "https://mcp.example.com/mcp",
+        "https://mcp.example.com?debug=true",
+        "https://mcp.example.com/#fragment",
+        "https://mcp.example.com:0",
+        "https://-invalid.example.com",
+    ],
+)
+def test_invalid_public_base_url_fails_at_start_up(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("MCP_PUBLIC_BASE_URL", value)
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([])
 
 
 def test_sse_is_not_an_option() -> None:

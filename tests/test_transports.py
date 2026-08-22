@@ -19,6 +19,7 @@ import pytest
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
+from dependency_compat_mcp.cli import _build_parser, _transport_security
 from dependency_compat_mcp.server import build_server
 from tests.conftest import FakeFetcher, build_service, pypi_release, pypi_url
 
@@ -428,3 +429,36 @@ async def test_http_refuses_dns_rebinding_attempts(
             json=_body(5, "tools/list"),
         )
     assert response.status_code == expected_status
+
+
+@pytest.mark.anyio
+async def test_http_accepts_the_configured_cloud_run_host_and_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PORT", "8080")
+    monkeypatch.setenv("MCP_PUBLIC_BASE_URL", "https://dependency-compat-abc.a.run.app")
+    args = _build_parser().parse_args(["--transport", "http", "--host", "0.0.0.0"])
+    service = build_service(FakeFetcher(payloads=DJANGO_PAYLOADS))
+    app = build_server(service).streamable_http_app(
+        streamable_http_path="/mcp",
+        stateless_http=True,
+        json_response=True,
+        transport_security=_transport_security(args),
+    )
+
+    async with (
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="https://dependency-compat-abc.a.run.app",
+        ) as client,
+        app.router.lifespan_context(app),
+    ):
+        response = await client.post(
+            "/mcp",
+            headers=_headers(
+                "tools/list", Origin="https://dependency-compat-abc.a.run.app"
+            ),
+            json=_body(8, "tools/list"),
+        )
+
+    assert response.status_code == 200
