@@ -19,7 +19,8 @@ from dependency_compat_mcp.descriptions import (
     GET_COMPATIBILITY_CONTEXT_DESCRIPTION,
     REQUIRED_ELEMENTS,
 )
-from dependency_compat_mcp.server import build_server
+from dependency_compat_mcp.domain.errors import InvariantViolation
+from dependency_compat_mcp.server import PROTOCOL_VERSION, build_server
 from tests.conftest import FakeFetcher, build_service, pypi_release, pypi_url
 
 DJANGO = pypi_release("Django", "5.2", requires_python=">=3.10,<3.14")
@@ -39,6 +40,45 @@ def _resolve(schema: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
     while "$ref" in node:
         node = schema["$defs"][node["$ref"].rsplit("/", 1)[-1]]
     return node
+
+
+# --------------------------------------------------------------------------------------
+# Protocol
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_the_in_memory_client_is_served_the_protocol_01_fixed(
+    server: MCPServer,
+) -> None:
+    """The in-memory leg of 01's three completion criteria, pinned to a revision.
+
+    ``Client`` picks the protocol by probing, so this asserts what the other tests in this
+    file are implicitly running on. Without it they would keep passing on whatever the SDK
+    negotiated, which is how a 2025 connection stayed invisible here before.
+    """
+    async with Client(server) as client:
+        assert client.protocol_version == PROTOCOL_VERSION
+
+
+def test_the_server_refuses_to_build_if_the_sdk_widens_the_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new revision in a future SDK is 01's decision, not a silent one.
+
+    ``server/discover`` advertises the SDK's list while the middleware enforces the pinned
+    constant. Letting those drift would advertise a revision the server then refuses, so the
+    disagreement is a start-up failure - the same treatment `curated/loader.py` gives a bad
+    pack, and for the same reason: better a server that will not boot than one serving a
+    contract it does not honour.
+    """
+    monkeypatch.setattr(
+        "dependency_compat_mcp.server.MODERN_PROTOCOL_VERSIONS",
+        (PROTOCOL_VERSION, "2027-01-01"),
+    )
+    fetcher = FakeFetcher(payloads={})
+    with pytest.raises(InvariantViolation, match=PROTOCOL_VERSION):
+        build_server(build_service(fetcher))
 
 
 # --------------------------------------------------------------------------------------

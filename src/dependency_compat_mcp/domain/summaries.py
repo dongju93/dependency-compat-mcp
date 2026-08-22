@@ -53,7 +53,7 @@ __all__ = [
 # --------------------------------------------------------------------------------------
 
 _SUPPORTED: Final = (
-    "{declaring} declares support for {declared_about} via {rule}, "
+    "{declared_about} satisfies {declaring}'s {rule}, "
     "backed by {evidence_count} source(s)."
 )
 _UNSUPPORTED: Final = (

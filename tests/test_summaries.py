@@ -54,7 +54,7 @@ REVERSED_RELATION = relation_of(PYTHON, FRAMEWORK)
 DIST_RELATION = relation_of(FRAMEWORK, parse_target("pypi", "example-library", "2.0"))
 
 EXPECTED_TEMPLATES: tuple[str, ...] = (
-    "{declaring} declares support for {declared_about} via {rule}, "
+    "{declared_about} satisfies {declaring}'s {rule}, "
     "backed by {evidence_count} source(s).",
     "{declaring} excludes {declared_about} via {rule}, "
     "backed by {evidence_count} source(s).",
@@ -115,8 +115,8 @@ def test_supported_summary_names_both_sides_and_the_rule() -> None:
         PYTHON_RELATION,
     )
     assert summary == (
-        "pypi:example-framework 5.2 declares support for runtime:python 3.13 "
-        "via requires_python, backed by 1 source(s)."
+        "runtime:python 3.13 satisfies pypi:example-framework 5.2's requires_python, "
+        "backed by 1 source(s)."
     )
 
 

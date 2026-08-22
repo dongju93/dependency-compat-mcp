@@ -5,8 +5,13 @@ PyPI, npm or the decision procedure. Its whole job is to turn a request into par
 domain values, hand them to the service, and turn the outcome into either a structured
 result or an explicit tool error.
 
-Two things here are not defaults and are worth the reading time:
+Three things here are not defaults and are worth the reading time:
 
+* **Only one protocol revision is served.** The SDK serves the pre-2026 `initialize`
+  handshake alongside the revision 01 fixed, and picks between them from the client's first
+  frame - silently, without an error. `reject_legacy_protocol` refuses every request that is
+  not on `PROTOCOL_VERSION`, so what `server/discover` advertises is also all this server
+  will answer.
 * **The top-level arguments object is closed by middleware.** 02 rejects undefined fields,
   including its own example, ``repository_path``. The SDK enforces ``extra="forbid"`` for
   nested models but builds the top-level arguments model itself, so the check lives in an
@@ -22,10 +27,17 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, Final
 
+from mcp import MCPError
 from mcp.server import MCPServer
 from mcp.server.context import HandlerResult, ServerRequestContext
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp_types import CallToolResult, TextContent
+from mcp_types import (
+    UNSUPPORTED_PROTOCOL_VERSION,
+    CallToolResult,
+    TextContent,
+    UnsupportedProtocolVersionErrorData,
+)
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import ValidationError
 
 from dependency_compat_mcp.contracts.inputs import TargetInput
@@ -42,10 +54,12 @@ from dependency_compat_mcp.domain.errors import InputError, InvariantViolation
 from dependency_compat_mcp.service import CompatibilityService
 
 __all__ = [
+    "PROTOCOL_VERSION",
     "SERVER_NAME",
     "SERVER_VERSION",
     "TOOL_ARGUMENT_NAMES",
     "build_server",
+    "reject_legacy_protocol",
     "reject_unknown_arguments",
 ]
 
@@ -53,6 +67,11 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME: Final = "dependency-compat-mcp"
 SERVER_VERSION: Final = "0.1.0"
+
+# The one revision this server implements (01). Written out rather than read from the SDK
+# so a release that widens `MODERN_PROTOCOL_VERSIONS` cannot quietly widen what this server
+# answers to; `_pin_protocol_version` turns that drift into a start-up failure.
+PROTOCOL_VERSION: Final = "2026-07-28"
 
 # The single source of truth for "which top-level keys does each tool accept".
 TOOL_ARGUMENT_NAMES: Final[dict[str, frozenset[str]]] = {
@@ -91,6 +110,53 @@ def _as_tool_error() -> Iterator[None]:
 # --------------------------------------------------------------------------------------
 # Boundary middleware
 # --------------------------------------------------------------------------------------
+
+
+async def reject_legacy_protocol(
+    ctx: ServerRequestContext[Any, Any],
+    call_next: Any,
+) -> HandlerResult:
+    """Serve ``PROTOCOL_VERSION`` and nothing else (01).
+
+    01 fixes one revision, but the SDK keeps the pre-2026 ``initialize`` handshake reachable
+    beside it and routes to whichever the client opens with - on stdio from the first frame,
+    on Streamable HTTP from the ``MCP-Protocol-Version`` header. Neither route errors: an
+    unrecognised version offered to the handshake is counter-offered the newest handshake
+    revision, and a request with no version header defaults to one. Without this middleware a
+    2025 client is quietly served the 2025 protocol by a server whose ``server/discover``
+    says it speaks only 2026-07-28.
+
+    One check covers both transports because every request - ``initialize`` included -
+    reaches the handler through this chain, and ``ctx.protocol_version`` is already the
+    connection's negotiated revision by then. ``initialize`` commits its negotiation only
+    after the chain returns, so refusing here leaves no half-open legacy connection behind.
+
+    Unlike `reject_unknown_arguments` this *raises*, and deliberately: the caller is not
+    holding a tool result the server declined to fill in, it is speaking a protocol this
+    server does not implement. -32022 with the supported list is what a client needs in order
+    to reconnect correctly, and it is the same code the SDK itself answers with.
+    """
+    if ctx.protocol_version == PROTOCOL_VERSION:
+        return await call_next(ctx)
+
+    # On the handshake the connection still carries the SDK's seeded default, so the version
+    # the caller actually asked for is in the params - report that, not the placeholder.
+    requested = ctx.protocol_version
+    if ctx.method == "initialize" and isinstance(ctx.params, dict):
+        proposed = ctx.params.get("protocolVersion")
+        if isinstance(proposed, str):
+            requested = proposed
+    logger.warning("refused a request on protocol %s", requested)
+    raise MCPError(
+        code=UNSUPPORTED_PROTOCOL_VERSION,
+        message=(
+            f"this server implements MCP {PROTOCOL_VERSION} only; carry the per-request "
+            "protocol envelope in `params._meta` instead of opening an initialize handshake"
+        ),
+        data=UnsupportedProtocolVersionErrorData(
+            supported=[PROTOCOL_VERSION], requested=requested
+        ).model_dump(mode="json"),
+    )
 
 
 async def reject_unknown_arguments(
@@ -170,6 +236,21 @@ def _inline_root_ref(server: MCPServer, tool_name: str) -> None:
     schema["type"] = "object"
 
 
+def _pin_protocol_version() -> None:
+    """Fail at build time if the SDK stops treating ``PROTOCOL_VERSION`` as the only modern one.
+
+    ``server/discover`` advertises the SDK's list while `reject_legacy_protocol` enforces the
+    pinned constant, so the two have to be the same set or the server would advertise a
+    revision it refuses. A new revision in a future SDK is a decision for 01 to make, and
+    this turns it into a start-up failure rather than a contradiction served to clients.
+    """
+    if tuple(MODERN_PROTOCOL_VERSIONS) != (PROTOCOL_VERSION,):
+        raise InvariantViolation(
+            f"the SDK now serves {list(MODERN_PROTOCOL_VERSIONS)} as current protocol "
+            f"revisions, but 01 fixes this server at {PROTOCOL_VERSION}"
+        )
+
+
 def _withdraw_unimplemented_capabilities(server: MCPServer) -> None:
     """Stop advertising Resources and Prompts.
 
@@ -197,18 +278,21 @@ def _withdraw_unimplemented_capabilities(server: MCPServer) -> None:
 
 
 def build_server(service: CompatibilityService) -> MCPServer:
-    """Register the two tools of 02 against ``service``.
+    """Register the two tools of 02 against ``service`` on the protocol of 01.
 
     Only Tools are advertised. Resources and Prompts are deliberately absent (01): the
     runtime tables and the curated pack are inputs to a tool, not separately published
     resources, and a deterministic rule engine has nothing to prompt about.
     """
+    _pin_protocol_version()
     server = MCPServer(
         name=SERVER_NAME,
         title="Dependency compatibility",
         version=SERVER_VERSION,
         instructions=SERVER_INSTRUCTIONS,
-        middleware=[reject_unknown_arguments],
+        # Outermost first: a request on a protocol this server does not implement is refused
+        # before anything reads its arguments.
+        middleware=[reject_legacy_protocol, reject_unknown_arguments],
     )
 
     @server.tool(

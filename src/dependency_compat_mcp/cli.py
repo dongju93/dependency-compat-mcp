@@ -5,6 +5,11 @@ HTTP is the remote one, and it runs stateless because 01 forbids inferring anyth
 a request from its connection. SSE is deliberately absent - the 2026-07-28 specification
 deprecates it for new implementations.
 
+Neither transport is configured to pick a protocol revision, because neither can: the SDK
+keeps the pre-2026 handshake era reachable on both, chosen by the client's opening frame on
+``stdio`` and by the version header over HTTP. `server.reject_legacy_protocol` refuses that
+era for both at the one point they share.
+
 On ``stdio``, stdout is the protocol wire, so logging is pinned to stderr before anything
 else happens. A stray ``print`` on stdout corrupts the session.
 """
