@@ -32,6 +32,10 @@ from dependency_compat_mcp.domain.claims import (
     Claim,
     CompatibilityStatement,
     Corroboration,
+    EolNotApplicable,
+    EolPublished,
+    EolUnavailable,
+    EolUnpublished,
     EvidenceId,
     InstallationGate,
     MarkerCondition,
@@ -57,7 +61,6 @@ from dependency_compat_mcp.domain.targets import ExactVersion, TargetId, version
 from dependency_compat_mcp.domain.versions import admits, release_tuple
 
 __all__ = [
-    "CuratedCoverage",
     "EvaluationInput",
     "Supported",
     "Unknown",
@@ -94,18 +97,6 @@ type _Bucket = Literal[
 
 
 @dataclass(frozen=True, slots=True)
-class CuratedCoverage:
-    """What the curated pack had to say about the declaring target.
-
-    Kept separate from the claims themselves because absence of a curated entry is not a
-    claim - it is unchecked scope, and 03 reports it as a ``limitation``.
-    """
-
-    entry_present: bool
-    verified_for_version: bool
-
-
-@dataclass(frozen=True, slots=True)
 class EvaluationInput:
     """Everything the decision procedure is allowed to see, already normalised.
 
@@ -119,7 +110,6 @@ class EvaluationInput:
     claims: tuple[Claim, ...]
     facts: ReleaseFacts
     lookups: tuple[SourceCheck, ...]
-    curated: CuratedCoverage
     declaring_release_found: bool
     declared_about_release_found: bool
 
@@ -457,9 +447,7 @@ def _classify_all(claims: Sequence[Claim], version: ExactVersion) -> _Buckets:
 # --------------------------------------------------------------------------------------
 
 
-def coverage_limitations(
-    curated: CuratedCoverage, lookups: Iterable[SourceCheck]
-) -> tuple[Limitation, ...]:
+def coverage_limitations(lookups: Iterable[SourceCheck]) -> tuple[Limitation, ...]:
     """Limitations derivable from coverage alone, independent of any verdict.
 
     Both tools compute these the same way on purpose (03): what the server failed to open
@@ -467,11 +455,6 @@ def coverage_limitations(
     ``check_compatibility`` and ``get_compatibility_context``.
     """
     limitations: list[Limitation] = []
-    if not curated.entry_present:
-        limitations.append(Limitation("curated_pack_missing"))
-    elif not curated.verified_for_version:
-        limitations.append(Limitation("curated_not_verified_for_version"))
-
     for check in lookups:
         # A required source that failed is reported as `lookup_failed`, not as a
         # limitation; these two cases are the ones that leave optional scope unchecked.
@@ -573,15 +556,36 @@ def _declared_about_is_newer(facts: ReleaseFacts) -> bool:
     return facts.declared_about_released_at > facts.declaring_released_at
 
 
-def _declared_about_was_eol(facts: ReleaseFacts) -> bool:
+type _FloorCheck = Literal["not_stale", "stale", "uncheckable"]
+
+
+def _lower_bound_check(facts: ReleaseFacts) -> _FloorCheck:
     """Was the counterpart already end-of-life when the declaring release shipped?
 
-    Relations with no release table (``pypi`` x ``pypi``) carry no ``eol_at``, so this
-    branch never fires there and step 5 short-circuits to ``supported``.
+    Three answers, not two. ``uncheckable`` is the one that matters: it means the official
+    lifecycle source could not be read, so the floor rule neither fired nor was cleared.
+    Folding it into ``not_stale`` would let a source failure be reported as ``supported``,
+    which is the one direction this server must never fail in.
+
+    Relations with no support lifecycle (``pypi`` x ``pypi``) answer ``not_stale``: the
+    question does not arise, so step 5 short-circuits to ``supported`` there.
     """
-    if facts.declaring_released_at is None or facts.declared_about_eol_at is None:
-        return False
-    return facts.declared_about_eol_at <= facts.declaring_released_at
+    if facts.declaring_released_at is None:
+        # Without the declaring release's own date there is nothing to compare an
+        # end-of-life instant against, so the rule cannot fire whatever the lifecycle
+        # source said. A failure that could not have changed this verdict is not the thing
+        # that left it open, and must not be reported as a cause - it is still reported as
+        # a `source_unavailable` limitation.
+        return "not_stale"
+    match facts.declared_about_eol:
+        case EolUnavailable():
+            return "uncheckable"
+        case EolNotApplicable() | EolUnpublished():
+            return "not_stale"
+        case EolPublished(at=at):
+            return "stale" if at <= facts.declaring_released_at else "not_stale"
+        case never:
+            assert_never(never)
 
 
 def _step_five(
@@ -612,22 +616,37 @@ def _step_five(
             ],
         )
 
-    if _declared_about_was_eol(facts):
-        # The mirror image of the open ceiling: a runtime already dead at release time was
-        # no more verified by the author than one that did not yet exist.
-        if corroborating:
-            return _supported(gates + corroborating, notices, limitations)
-        return _unknown(
-            "insufficient_evidence",
-            notices,
-            limitations,
-            [
-                UnprovenClaim(kind="stale_lower_bound", evidence_ids=gates),
-                *buckets.causes,
-            ],
-        )
+    match _lower_bound_check(facts):
+        case "stale":
+            # The mirror image of the open ceiling: a runtime already dead at release time
+            # was no more verified by the author than one that did not yet exist.
+            floor_cause: UnprovenClaim | None = UnprovenClaim(
+                kind="stale_lower_bound", evidence_ids=gates
+            )
+        case "uncheckable":
+            # The gate is satisfied and open-ended, and the source that would say whether
+            # the counterpart was already dead could not be read. Saying `supported` here
+            # would publish a conclusion that rests on a lookup the server never made.
+            floor_cause = UnprovenClaim(
+                kind="lifecycle_unavailable", evidence_ids=gates
+            )
+        case "not_stale":
+            floor_cause = None
+        case never:
+            assert_never(never)
 
-    return _supported(gates, notices, limitations)
+    if floor_cause is None:
+        return _supported(gates, notices, limitations)
+    if corroborating:
+        # Direct positive evidence about this exact version does not depend on the floor
+        # rule, so it settles the question either way.
+        return _supported(gates + corroborating, notices, limitations)
+    return _unknown(
+        "insufficient_evidence",
+        notices,
+        limitations,
+        [floor_cause, *buckets.causes],
+    )
 
 
 def _step_six(
@@ -678,7 +697,7 @@ def evaluate(evaluation: EvaluationInput) -> Verdict:
     relation = evaluation.relation
     facts = evaluation.facts
     notices = _release_state_notices(relation, facts)
-    limitations = list(coverage_limitations(evaluation.curated, evaluation.lookups))
+    limitations = list(coverage_limitations(evaluation.lookups))
 
     # Step 0. Failure is checked before absence: reporting "no such release" while a
     # required source never answered would turn a failed lookup into a factual claim.

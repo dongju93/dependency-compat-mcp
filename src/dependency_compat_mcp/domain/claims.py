@@ -12,13 +12,16 @@ merely unlikely:
   cannot be made to argue for ``unsupported``.
 * :class:`VersionConstraintEvidence` / :class:`NarrativeEvidence` keep "carries no
   constraint" distinct from "carries an empty constraint".
-* :class:`Fetched` / :class:`Curated` keep the two incompatible notions of freshness -
-  when the server looked, and when a human last checked the source - in separate types.
+* :class:`EolPublished` / :class:`EolUnpublished` / :class:`EolNotApplicable` /
+  :class:`EolUnavailable` keep the four reasons an end-of-life date can be absent apart.
+  A bare ``datetime | None`` would let "upstream has announced no date", "this counterpart
+  has no support lifecycle at all" and "the lifecycle source could not be read" collapse
+  into one value, and the last of those must never be able to pass for the first two.
 """
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from typing import Final, Literal, assert_never
 
 from packaging.markers import InvalidMarker, Marker
@@ -38,7 +41,11 @@ __all__ = [
     "Claim",
     "CompatibilityStatement",
     "Corroboration",
-    "Curated",
+    "EolNotApplicable",
+    "EolPublished",
+    "EolStatus",
+    "EolUnavailable",
+    "EolUnpublished",
     "Evidence",
     "EvidenceId",
     "Fetched",
@@ -47,7 +54,6 @@ __all__ = [
     "MarkerCondition",
     "MarkerDecidability",
     "NarrativeEvidence",
-    "Provenance",
     "ReleaseFacts",
     "SourceCheck",
     "SourceId",
@@ -64,15 +70,16 @@ type Tier = Literal["A", "B", "C"]
 type SourceType = Literal[
     "registry_metadata",
     "registry_classifier",
-    "official_support_policy",
-    "official_release_note",
+    "official_release_index",
+    "official_release_cycle",
 ]
 type SourceId = Literal[
     "pypi_json",
     "npm_registry",
-    "curated_pack",
-    "python_release_table",
-    "node_release_table",
+    "python_release_index",
+    "python_release_cycle",
+    "node_release_index",
+    "node_release_schedule",
 ]
 type LookupOutcome = Literal["ok", "not_found", "failed", "skipped"]
 # Which side of the resolved relation a lookup was made for. `get_compatibility_context`
@@ -84,9 +91,10 @@ _ROLE_ORDER: Final[dict[str, int]] = {"declaring": 0, "declared_about": 1}
 SOURCE_IDS: Final[tuple[SourceId, ...]] = (
     "pypi_json",
     "npm_registry",
-    "curated_pack",
-    "python_release_table",
-    "node_release_table",
+    "python_release_index",
+    "python_release_cycle",
+    "node_release_index",
+    "node_release_schedule",
 )
 
 _TIER_ORDER: Final[dict[str, int]] = {"A": 0, "B": 1, "C": 2}
@@ -206,20 +214,15 @@ def analyse_marker(expression: str) -> MarkerCondition:
 
 @dataclass(frozen=True, slots=True)
 class Fetched:
-    """Freshness of a looked-up source: when this process retrieved it."""
+    """Freshness of a source: when this process retrieved it.
+
+    Every piece of evidence this server can produce is fetched at request time, so there
+    is exactly one notion of freshness. Evidence carries this type directly rather than a
+    one-member union: a second, non-fetched provenance would be a second claim about when
+    a fact was last confirmed, and there is no such source any more.
+    """
 
     retrieved_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class Curated:
-    """Freshness of a committed source: when a human last checked it against the original."""
-
-    reviewed_at: date
-    pack_version: str
-
-
-type Provenance = Fetched | Curated
 
 
 # --------------------------------------------------------------------------------------
@@ -239,7 +242,7 @@ class VersionConstraintEvidence:
     substantiates: str
     expression: str
     scheme: VersionScheme
-    provenance: Provenance
+    provenance: Fetched
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +255,7 @@ class NarrativeEvidence:
     title: str
     url: str
     substantiates: str
-    provenance: Provenance
+    provenance: Fetched
 
 
 type Evidence = VersionConstraintEvidence | NarrativeEvidence
@@ -354,18 +357,57 @@ class YankedInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class EolPublished:
+    """Upstream has announced a day-precision end-of-life date for this release line."""
+
+    at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class EolUnpublished:
+    """The lifecycle source answered, and announces no end-of-life date for this line.
+
+    Upstream publishes month-precision dates (``2031-10``) for lines that have not reached
+    end of life yet. A month is not a date, and padding one to a day would manufacture the
+    very fact 03's staleness rule is supposed to rest on, so it is reported as unpublished.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class EolNotApplicable:
+    """The counterpart has no support lifecycle: a registry package, not a runtime."""
+
+
+@dataclass(frozen=True, slots=True)
+class EolUnavailable:
+    """The lifecycle source could not be read, so nothing about end of life is known.
+
+    Distinct from :class:`EolUnpublished` on purpose. "Upstream announced no date" is a
+    fact the staleness rule may safely pass over; "the server could not ask" is not, and
+    letting the two share a representation is what would allow a confident verdict to be
+    built on a hidden failure.
+    """
+
+    detail: str
+
+
+type EolStatus = EolPublished | EolUnpublished | EolNotApplicable | EolUnavailable
+
+
+@dataclass(frozen=True, slots=True)
 class ReleaseFacts:
     """Temporal facts the gate-shape rules of 03 step 5 need.
 
     ``declared_about_released_at`` powers the open-ceiling rule, and
-    ``declared_about_eol_at`` its mirror image on the floor. Both are ``None`` for
-    relations where the question does not arise (package-to-package, for instance), which
-    is why step 5 short-circuits to ``supported`` there.
+    ``declared_about_eol`` its mirror image on the floor. The release instants are ``None``
+    for relations where the question does not arise (package-to-package, for instance),
+    which is why step 5 short-circuits to ``supported`` there; the end-of-life side says
+    the same thing with :class:`EolNotApplicable` rather than another ``None``.
     """
 
     declaring_released_at: datetime | None
     declared_about_released_at: datetime | None
-    declared_about_eol_at: datetime | None
+    declared_about_eol: EolStatus
     declaring_yanked: YankedInfo | None
     declared_about_yanked: YankedInfo | None
 

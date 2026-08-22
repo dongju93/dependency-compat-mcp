@@ -1,11 +1,11 @@
-"""Process wiring: what is loaded at start-up, and what a bad start-up does.
+"""Process wiring: what the transports are configured with, and what start-up costs.
 
-03 wants a schema violation in the curated data to be a *start-up* failure rather than a
-quiet degradation, so the wiring is worth its own tests: serving wrong evidence is worse
-than not serving.
+Start-up loads nothing. There is no committed evidence to validate, so the wiring tests
+here assert the other half of that: the service comes up with its adapters sharing one
+HTTP client, and every source it can reach is on the allowlist.
 """
 
-from pathlib import Path
+import asyncio
 
 import pytest
 
@@ -17,10 +17,7 @@ from dependency_compat_mcp.cli import (
     _transport_security,
     build_service,
 )
-from dependency_compat_mcp.curated.loader import PackLoadError
 from dependency_compat_mcp.server import build_server
-
-FIXTURES = Path(__file__).parent / "fixtures" / "packs"
 
 
 def test_the_package_root_exposes_main_without_importing_the_server() -> None:
@@ -144,17 +141,17 @@ def test_sse_is_not_an_option() -> None:
         _build_parser().parse_args(["--transport", "sse"])
 
 
-def test_build_service_loads_the_shipped_static_data() -> None:
+def test_build_service_reads_no_repository_state_at_start_up() -> None:
+    """Nothing is loaded, so nothing can be stale by the time a request arrives."""
     service = build_service()
-    assert service.pack.pack_version
-    # The shipped pack is empty on purpose; the runtime tables are not.
-    assert service.pack.entries == ()
-    assert service.runtimes.table.pack_version
-
-
-def test_a_malformed_pack_fails_at_start_up_instead_of_degrading() -> None:
-    with pytest.raises(PackLoadError):
-        build_service(pack_directory=FIXTURES / "missing_source_url")
+    try:
+        # One client, shared by every adapter, owned by the service.
+        assert service.fetcher is not None
+        assert service.pypi._fetcher is service.fetcher
+        assert service.npm._fetcher is service.fetcher
+        assert service.runtimes.fetcher is service.fetcher
+    finally:
+        asyncio.run(service.aclose())
 
 
 def test_the_wired_server_is_usable() -> None:

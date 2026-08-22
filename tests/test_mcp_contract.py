@@ -68,8 +68,8 @@ def test_the_server_refuses_to_build_if_the_sdk_widens_the_protocol(
 
     ``server/discover`` advertises the SDK's list while the middleware enforces the pinned
     constant. Letting those drift would advertise a revision the server then refuses, so the
-    disagreement is a start-up failure - the same treatment `curated/loader.py` gives a bad
-    pack, and for the same reason: better a server that will not boot than one serving a
+    disagreement is a start-up failure, for the reason this server prefers throughout:
+    better a server that will not boot than one serving a
     contract it does not honour.
     """
     monkeypatch.setattr(
@@ -98,7 +98,7 @@ async def test_only_the_two_documented_tools_are_advertised(server: MCPServer) -
 
 @pytest.mark.anyio
 async def test_no_resources_or_prompts_are_advertised(server: MCPServer) -> None:
-    """01: the runtime tables and the pack are inputs to a tool, not published resources.
+    """01: this server publishes no documents of its own, so it advertises none.
 
     Advertising a capability that is not implemented would enlarge the state space both
     sides have to handle for nothing.
@@ -191,6 +191,7 @@ async def test_check_output_schema_is_the_three_variant_sum_type(
     ]
     assert sorted(schema["$defs"]["UnprovenKind"]["enum"]) == [
         "claim_outside_range",
+        "lifecycle_unavailable",
         "open_upper_bound",
         "stale_lower_bound",
         "tier_c_only",
@@ -252,7 +253,14 @@ async def test_context_output_schema_is_the_two_variant_sum_type(
     assert schema is not None
     assert schema["discriminator"]["propertyName"] == "availability"
     for name in ("ContextAvailableResult", "ContextUnknownResult"):
-        assert "depth" in schema["$defs"][name]["required"]
+        variant = schema["$defs"][name]
+        assert "constraints" in variant["required"]
+        assert "sources_checked" in variant["required"]
+        # The curated tier is gone, and so is the field that described how deep it went.
+        assert "depth" not in variant["properties"]
+        assert "changes" not in variant["properties"]
+    assert "reason" in schema["$defs"]["ContextUnknownResult"]["required"]
+    assert "reason" not in schema["$defs"]["ContextAvailableResult"]["properties"]
 
 
 @pytest.mark.anyio
@@ -486,4 +494,3 @@ async def test_context_tool_round_trips(server: MCPServer) -> None:
     assert result.is_error is False
     structured = result.structured_content
     assert structured["availability"] == "available"
-    assert structured["depth"] == "registry_only"

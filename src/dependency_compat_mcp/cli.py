@@ -20,7 +20,6 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
@@ -30,10 +29,6 @@ from mcp.server.transport_security import TransportSecuritySettings
 from dependency_compat_mcp.adapters.npm import NpmAdapter
 from dependency_compat_mcp.adapters.pypi import PyPIAdapter
 from dependency_compat_mcp.adapters.runtimes import RuntimeReleaseAdapter
-from dependency_compat_mcp.curated.loader import (
-    load_curated_pack,
-    load_runtime_releases,
-)
 from dependency_compat_mcp.infra.http import HttpxJsonFetcher
 from dependency_compat_mcp.server import build_server
 from dependency_compat_mcp.service import CompatibilityService
@@ -145,22 +140,19 @@ def _transport_security(args: argparse.Namespace) -> TransportSecuritySettings:
     )
 
 
-def build_service(
-    *, pack_directory: Path | None = None, runtime_table: Path | None = None
-) -> CompatibilityService:
-    """Load static data and wire the adapters.
+def build_service() -> CompatibilityService:
+    """Wire the adapters over one shared HTTP client.
 
-    The curated pack and the runtime tables are read once, here. A schema violation raises
-    and the process fails to start, which 03 prefers over serving quietly wrong evidence.
+    Nothing is loaded from the repository. Every fact this server answers with - a package
+    release, a runtime release, an end-of-life date - is read from its official source when
+    a request needs it, so start-up has no evidence state to validate and no snapshot that
+    could be out of date by the time it is served.
     """
-    pack = load_curated_pack(pack_directory)
-    table = load_runtime_releases(runtime_table)
     fetcher = HttpxJsonFetcher()
     return CompatibilityService(
         pypi=PyPIAdapter(fetcher=fetcher),
         npm=NpmAdapter(fetcher=fetcher),
-        runtimes=RuntimeReleaseAdapter(table=table),
-        pack=pack,
+        runtimes=RuntimeReleaseAdapter(fetcher=fetcher),
         fetcher=fetcher,
     )
 

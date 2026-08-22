@@ -48,8 +48,27 @@ __all__ = [
 
 _logger: Final = logging.getLogger(__name__)
 
-ALLOWED_HOSTS: Final[frozenset[str]] = frozenset({"pypi.org", "registry.npmjs.org"})
-"""Every host this server may open a connection to. Display-only URLs are not listed."""
+ALLOWED_HOSTS: Final[frozenset[str]] = frozenset(
+    {
+        # Package registries.
+        "pypi.org",
+        "registry.npmjs.org",
+        # Runtime release existence and dates.
+        "www.python.org",
+        "nodejs.org",
+        # Runtime support lifecycle (end-of-life) schedules.
+        "peps.python.org",
+        "raw.githubusercontent.com",
+    }
+)
+"""Every host this server may open a connection to. Display-only URLs are not listed.
+
+Each entry is the publisher of record for the facts read from it: python.org and nodejs.org
+serve their own release indexes, peps.python.org serves the CPython release cycle the
+devguide itself reads, and ``raw.githubusercontent.com`` serves ``nodejs/Release``'s
+``schedule.json``, which is where the Node.js project publishes its support schedule.
+Adding a host widens what this server will treat as fact and requires human review.
+"""
 
 MAX_RESPONSE_BYTES: Final = 5 * 1024 * 1024
 """Body ceiling. A large npm packument must not decide this server's memory use."""

@@ -14,15 +14,14 @@ reaches a caller:
   "conditional on nothing in particular" cannot be expressed;
 * ``sources_checked`` empty exactly when no lookup was attempted, which happens only for
   ``relation_not_supported``;
-* evidence split into constraint-carrying and narrative types instead of nullable fields;
-* ``depth`` and the presence of curated provenance are each other's mirror.
+* evidence split into constraint-carrying and narrative types instead of nullable fields.
 
 A validator failing here is not bad external data - it means the server assembled
 something it should not have been able to assemble, so the failure surfaces as a tool
 error (03 step 7).
 """
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal, Self
 
 from pydantic import (
@@ -45,7 +44,6 @@ from dependency_compat_mcp.domain.relations import Direction, RuleName
 from dependency_compat_mcp.domain.targets import Namespace, VersionScheme
 
 __all__ = [
-    "ChangeOut",
     "CheckCompatibilityResult",
     "ConditionOut",
     "ConditionalClaimOut",
@@ -53,7 +51,6 @@ __all__ = [
     "ContextAvailableResult",
     "ContextResult",
     "ContextUnknownResult",
-    "CuratedProvenanceOut",
     "DecidedMarkerOut",
     "DecisionCauseOut",
     "EvidenceOut",
@@ -105,6 +102,13 @@ class TargetIdOut(_Out):
 
 
 class FetchedProvenanceOut(_Out):
+    """When this process retrieved the source. The only provenance a response can carry.
+
+    ``kind`` stays even though nothing competes with it: it names what the timestamp
+    means, and a caller reading ``retrieved_at`` should not have to infer that from the
+    field's absence of alternatives.
+    """
+
     kind: Literal["fetched"] = "fetched"
     retrieved_at: datetime
 
@@ -112,17 +116,6 @@ class FetchedProvenanceOut(_Out):
     def _serialise_retrieved_at(self, value: datetime) -> str:
         # 04 spells this as `...Z`; pydantic would otherwise emit `+00:00`.
         return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-class CuratedProvenanceOut(_Out):
-    kind: Literal["curated"] = "curated"
-    reviewed_at: date
-    pack_version: str
-
-
-type ProvenanceOut = Annotated[
-    FetchedProvenanceOut | CuratedProvenanceOut, Field(discriminator="kind")
-]
 
 
 class VersionConstraintEvidenceOut(_Out):
@@ -135,7 +128,7 @@ class VersionConstraintEvidenceOut(_Out):
     substantiates: str
     expression: str
     scheme: VersionScheme
-    provenance: ProvenanceOut
+    provenance: FetchedProvenanceOut
 
 
 class NarrativeEvidenceOut(_Out):
@@ -146,7 +139,7 @@ class NarrativeEvidenceOut(_Out):
     title: str
     url: str
     substantiates: str
-    provenance: ProvenanceOut
+    provenance: FetchedProvenanceOut
 
 
 type EvidenceOut = VersionConstraintEvidenceOut | NarrativeEvidenceOut
@@ -371,8 +364,8 @@ class UnknownResult(_VerdictBase):
                 "decision_causes must be present exactly for insufficient_evidence"
             )
         # An empty lookup list is a claim in itself - "nothing was opened" - and it is only
-        # true when no rule applied, because every resolved relation consults the pack even
-        # when the registries are unreachable.
+        # true when no rule applied, because a resolved relation always records a lookup
+        # for each side, even one that failed.
         if (not self.sources_checked) != (self.reason == "relation_not_supported"):
             raise ValueError(
                 "sources_checked is empty exactly when the relation was not supported"
@@ -411,22 +404,13 @@ class ConstraintOut(_Out):
     evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
 
 
-class ChangeOut(_Out):
-    category: Literal["breaking_change", "removal", "deprecation", "migration_required"]
-    area: str
-    summary: str
-    evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
-
-
 class _ContextBase(_Out):
-    # Same reason as `_VerdictBase.verdict`: availability, then depth, then the body.
+    # Same reason as `_VerdictBase.verdict`: availability first, then the body.
     availability: str
 
-    depth: Literal["registry_only", "registry_and_curated"]
     target: TargetOut
     summary: str
     constraints: tuple[ConstraintOut, ...]
-    changes: tuple[ChangeOut, ...]
     notices: tuple[NoticeOut, ...]
     limitations: tuple[LimitationOut, ...]
     sources_checked: tuple[SourceCheckOut, ...]
@@ -438,17 +422,11 @@ class _ContextBase(_Out):
             self.evidence,
             self.notices,
             extra_reference_groups=tuple(
-                [constraint.evidence_ids for constraint in self.constraints]
-                + [change.evidence_ids for change in self.changes]
+                constraint.evidence_ids for constraint in self.constraints
             ),
         )
         if not self.sources_checked:
             raise ValueError("a context response must record the lookups it rests on")
-        has_curated = any(item.provenance.kind == "curated" for item in self.evidence)
-        if has_curated != (self.depth == "registry_and_curated"):
-            raise ValueError(
-                "depth must be registry_and_curated exactly when curated evidence is present"
-            )
         return self
 
 
@@ -457,8 +435,8 @@ class ContextAvailableResult(_ContextBase):
 
     @model_validator(mode="after")
     def _require_material(self) -> Self:
-        if not self.constraints and not self.changes:
-            raise ValueError("an available context must carry a constraint or a change")
+        if not self.constraints:
+            raise ValueError("an available context must carry a constraint")
         return self
 
 
@@ -468,8 +446,8 @@ class ContextUnknownResult(_ContextBase):
 
     @model_validator(mode="after")
     def _require_emptiness(self) -> Self:
-        if self.constraints or self.changes:
-            raise ValueError("an unknown context must not carry constraints or changes")
+        if self.constraints:
+            raise ValueError("an unknown context must not carry constraints")
         return self
 
 

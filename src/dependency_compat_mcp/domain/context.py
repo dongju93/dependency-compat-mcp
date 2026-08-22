@@ -2,14 +2,12 @@
 
 This tool does not judge. It collects comparable material about one target and hands it to
 the MCP client, which is the party that actually holds the codebase (02). So there is no
-verdict type here - the outcome only says whether any material was found and how deep it
-goes.
+verdict type here - the outcome only says whether any material was found.
 
-``depth`` is the load-bearing field. ``requires_python`` and ``requires_dist`` exist on
-almost every PyPI distribution, so a response containing only those is a restatement of
-what the client already read from its lockfile. Surfacing "curated evidence present or not"
-at the top level is what stops the server from quietly presenting its own coverage limit as
-an answer.
+Every constraint reported here comes from the release's own registry metadata, fetched for
+this request. There is no second, slower-moving tier of material and therefore no ``depth``
+field: a response either carries declared constraints or says it found none, and
+``sources_checked`` says exactly what was read to reach that.
 """
 
 from collections.abc import Iterable, Sequence
@@ -17,10 +15,8 @@ from dataclasses import dataclass
 from typing import Literal, assert_never
 
 from dependency_compat_mcp.domain.claims import (
-    Curated,
     Evidence,
     EvidenceId,
-    Fetched,
     MarkerCondition,
     NarrativeEvidence,
     SourceCheck,
@@ -33,22 +29,19 @@ from dependency_compat_mcp.domain.diagnostics import (
     sorted_notices,
 )
 from dependency_compat_mcp.domain.errors import InvariantViolation
-from dependency_compat_mcp.domain.evaluate import CuratedCoverage, coverage_limitations
+from dependency_compat_mcp.domain.evaluate import coverage_limitations
 from dependency_compat_mcp.domain.targets import Target, TargetId, VersionScheme
 
 __all__ = [
     "ContextAvailable",
-    "ContextChange",
     "ContextConstraint",
     "ContextInput",
     "ContextOutcome",
     "ContextUnknown",
     "ContextUnknownReason",
-    "Depth",
     "build_context",
 ]
 
-type Depth = Literal["registry_only", "registry_and_curated"]
 type ContextUnknownReason = Literal[
     "release_not_found", "lookup_failed", "evidence_not_found"
 ]
@@ -84,26 +77,6 @@ class ContextConstraint:
 
 
 @dataclass(frozen=True, slots=True)
-class ContextChange:
-    """One reviewed change a caller has to check its code against.
-
-    Only the curated pack can produce these: registry metadata carries no breaking-change
-    information, and interpreting release notes at request time would need a model.
-    """
-
-    category: Literal["breaking_change", "removal", "deprecation", "migration_required"]
-    area: str
-    summary: str
-    evidence_ids: tuple[EvidenceId, ...]
-
-    def __post_init__(self) -> None:
-        if not self.evidence_ids:
-            raise InvariantViolation(
-                "a context change must cite at least one evidence id"
-            )
-
-
-@dataclass(frozen=True, slots=True)
 class ContextInput:
     """Everything the assembler may see. Referential integrity is checked on construction.
 
@@ -114,10 +87,8 @@ class ContextInput:
     target: Target
     release_found: bool
     constraints: tuple[ContextConstraint, ...]
-    changes: tuple[ContextChange, ...]
     evidence: tuple[Evidence, ...]
     lookups: tuple[SourceCheck, ...]
-    curated: CuratedCoverage
     marker_guarded: bool
     extra_guarded: bool
 
@@ -126,11 +97,8 @@ class ContextInput:
         dangling = sorted(
             {
                 identifier
-                for group in (
-                    *(constraint.evidence_ids for constraint in self.constraints),
-                    *(change.evidence_ids for change in self.changes),
-                )
-                for identifier in group
+                for constraint in self.constraints
+                for identifier in constraint.evidence_ids
                 if identifier not in known
             }
         )
@@ -148,27 +116,22 @@ class ContextInput:
 
 @dataclass(frozen=True, slots=True)
 class ContextAvailable:
-    """At least one constraint or change was found."""
+    """At least one declared constraint was found."""
 
-    depth: Depth
     constraints: tuple[ContextConstraint, ...]
-    changes: tuple[ContextChange, ...]
     notices: tuple[Notice, ...]
     limitations: tuple[Limitation, ...]
 
     def __post_init__(self) -> None:
-        if not self.constraints and not self.changes:
-            raise InvariantViolation(
-                "an available context must carry a constraint or a change"
-            )
+        if not self.constraints:
+            raise InvariantViolation("an available context must carry a constraint")
 
 
 @dataclass(frozen=True, slots=True)
 class ContextUnknown:
-    """Nothing comparable was found. ``depth`` is still reported, as 04 requires."""
+    """Nothing comparable was found, and which of the three reasons that was."""
 
     reason: ContextUnknownReason
-    depth: Depth
     notices: tuple[Notice, ...]
     limitations: tuple[Limitation, ...]
 
@@ -191,43 +154,8 @@ def _evidence_id(evidence: Evidence) -> EvidenceId:
             assert_never(evidence)
 
 
-def _is_curated(evidence: Evidence) -> bool:
-    match evidence.provenance:
-        case Curated():
-            return True
-        case Fetched():
-            return False
-        case _:
-            assert_never(evidence.provenance)
-
-
-def _depth(context: ContextInput) -> Depth:
-    """``registry_and_curated`` exactly when *used* evidence includes a curated source.
-
-    Deliberately computed from the evidence a constraint or change actually cites, not from
-    the whole catalogue: a curated entry that contributed nothing to the response must not
-    advertise depth the response does not have.
-    """
-    referenced = {
-        identifier
-        for group in (
-            *(constraint.evidence_ids for constraint in context.constraints),
-            *(change.evidence_ids for change in context.changes),
-        )
-        for identifier in group
-    }
-    return (
-        "registry_and_curated"
-        if any(
-            _evidence_id(item) in referenced and _is_curated(item)
-            for item in context.evidence
-        )
-        else "registry_only"
-    )
-
-
 def _limitations(context: ContextInput) -> list[Limitation]:
-    limitations = list(coverage_limitations(context.curated, context.lookups))
+    limitations = list(coverage_limitations(context.lookups))
     if context.marker_guarded:
         limitations.append(Limitation("marker_guarded_claim"))
     if context.extra_guarded:
@@ -237,13 +165,11 @@ def _limitations(context: ContextInput) -> list[Limitation]:
 
 def _unknown(
     reason: ContextUnknownReason,
-    depth: Depth,
     notices: Iterable[Notice],
     limitations: Sequence[Limitation],
 ) -> ContextUnknown:
     return ContextUnknown(
         reason=reason,
-        depth=depth,
         notices=sorted_notices(notices),
         limitations=sorted_limitations(limitations),
     )
@@ -260,19 +186,15 @@ def build_context(context: ContextInput) -> ContextOutcome:
     # Same ordering argument as the verdict's step 0: a failed required lookup must not be
     # reported as a missing release.
     if any(check.outcome == "failed" and check.required for check in context.lookups):
-        # The unknown variant intentionally carries no constraints or changes. Its depth
-        # must describe that emitted material, not curated input that this branch discards.
-        return _unknown("lookup_failed", "registry_only", notices, limitations)
+        return _unknown("lookup_failed", notices, limitations)
     if not context.release_found:
-        return _unknown("release_not_found", "registry_only", notices, limitations)
+        return _unknown("release_not_found", notices, limitations)
 
-    if not context.constraints and not context.changes:
-        return _unknown("evidence_not_found", "registry_only", notices, limitations)
+    if not context.constraints:
+        return _unknown("evidence_not_found", notices, limitations)
 
     return ContextAvailable(
-        depth=_depth(context),
         constraints=context.constraints,
-        changes=context.changes,
         notices=sorted_notices(notices),
         limitations=sorted_limitations(limitations),
     )

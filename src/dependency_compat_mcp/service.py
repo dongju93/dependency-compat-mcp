@@ -23,6 +23,7 @@ the MCP layer:
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final, assert_never
@@ -37,9 +38,19 @@ from dependency_compat_mcp.adapters.protocol import (
 )
 from dependency_compat_mcp.adapters.pypi import PyPIAdapter
 from dependency_compat_mcp.adapters.runtimes import (
+    RuntimeIndexLookup,
+    RuntimeLifecycleLookup,
+    RuntimeReleaseAbsent,
     RuntimeReleaseAdapter,
     RuntimeReleaseFound,
-    RuntimeReleaseMissing,
+    RuntimeReleaseUnavailable,
+    RuntimeSourceFailed,
+    index_check,
+    index_source_id,
+    lifecycle_check,
+    lifecycle_source_id,
+    select_eol,
+    select_release,
 )
 from dependency_compat_mcp.contracts.assembly import (
     build_check_result,
@@ -49,34 +60,30 @@ from dependency_compat_mcp.contracts.outputs import (
     CheckCompatibilityResult,
     GetCompatibilityContextResult,
 )
-from dependency_compat_mcp.curated.loader import (
-    CuratedPack,
-    PackEntry,
-    change_evidence,
-    statement_claims,
-)
 from dependency_compat_mcp.domain.claims import (
     Claim,
     CompatibilityStatement,
     Corroboration,
+    EolNotApplicable,
+    EolStatus,
+    EolUnavailable,
     Evidence,
     EvidenceId,
     InstallationGate,
     LookupRole,
     ReleaseFacts,
     SourceCheck,
+    SourceId,
     YankedInfo,
     claim_evidence_id,
 )
 from dependency_compat_mcp.domain.context import (
-    ContextChange,
     ContextConstraint,
     ContextInput,
     build_context,
 )
 from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.evaluate import (
-    CuratedCoverage,
     EvaluationInput,
     Unknown,
     evaluate,
@@ -107,16 +114,27 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_TTL_SECONDS: Final = 900.0
 
-type CacheKey = tuple[str, str, str, str, str]
+# One registry document per exact release; one runtime document per official source. The
+# runtime documents answer every version, so they are keyed by source alone - a per-version
+# key would re-fetch the same 300 KB index for each release asked about.
+type ReleaseCacheKey = tuple[SourceId, str, str, str]
+# Two release indexes and two support schedules; nothing else can enter these caches.
+_RUNTIME_CACHE_ENTRIES: Final = 2
 
 
 @dataclass(frozen=True, slots=True)
 class _Collected:
-    """Everything one side of a comparison contributed."""
+    """Everything one side of a comparison contributed.
+
+    ``eol`` is a four-way status rather than an optional date: a registry package has no
+    support lifecycle, a runtime line may have none published, and the schedule may simply
+    not have been readable. Only the last of those may block a decided verdict, so the
+    three must not share a representation.
+    """
 
     document: ReleaseDocument | None
     released_at: datetime | None
-    eol_at: datetime | None
+    eol: EolStatus
     yanked: YankedInfo | None
     found: bool
     checks: tuple[SourceCheck, ...]
@@ -124,26 +142,39 @@ class _Collected:
 
 @dataclass
 class CompatibilityService:
-    """Owns the adapters, the curated pack and the cache for the process' lifetime.
+    """Owns the adapters and the caches for the process' lifetime.
 
     Nothing here is bound to a connection or a session: 01 requires each request to be
     self-contained, so shared state is owned by this application object with an explicit
     key and its own lifetime.
+
+    The server holds no compatibility facts of its own. Everything it answers with is
+    fetched from an official source for the request that needed it, so the only state
+    between requests is a bounded, time-limited cache of those documents.
     """
 
     pypi: PyPIAdapter
     npm: NpmAdapter
     runtimes: RuntimeReleaseAdapter
-    pack: CuratedPack
     fetcher: HttpxJsonFetcher | None = None
     cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS
     request_budget_seconds: float = DEFAULT_REQUEST_BUDGET
-    _cache: TtlCache[CacheKey, ReleaseLookup] = field(init=False, repr=False)
+    _cache: TtlCache[ReleaseCacheKey, ReleaseLookup] = field(init=False, repr=False)
+    _index_cache: TtlCache[SourceId, RuntimeIndexLookup] = field(init=False, repr=False)
+    _lifecycle_cache: TtlCache[SourceId, RuntimeLifecycleLookup] = field(
+        init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.request_budget_seconds <= 0:
             raise ValueError("request_budget_seconds must be positive.")
         self._cache = TtlCache(ttl_seconds=self.cache_ttl_seconds)
+        self._index_cache = TtlCache(
+            ttl_seconds=self.cache_ttl_seconds, max_entries=_RUNTIME_CACHE_ENTRIES
+        )
+        self._lifecycle_cache = TtlCache(
+            ttl_seconds=self.cache_ttl_seconds, max_entries=_RUNTIME_CACHE_ENTRIES
+        )
 
     # ----------------------------------------------------------------------------------
     # check_compatibility
@@ -198,39 +229,27 @@ class CompatibilityService:
         )
 
         declared_about_id = TargetId.of(relation.declared_about)
-        registry_claims: tuple[Claim, ...] = ()
+        claims: tuple[Claim, ...] = ()
         evidence: list[Evidence] = []
         if declaring_side.document is not None:
-            registry_claims = select_claims(declaring_side.document, declared_about_id)
+            claims = select_claims(declaring_side.document, declared_about_id)
             evidence.extend(declaring_side.document.evidence)
 
-        entry = self.pack.lookup(relation.declaring)
-        curated_claims, curated_evidence = self._curated_claims(
-            entry, declared_about_id
-        )
-        evidence.extend(curated_evidence)
-
-        checks = (
-            *declaring_side.checks,
-            *declared_side.checks,
-            self._pack_check(entry, relation.declaring),
-        )
+        checks = (*declaring_side.checks, *declared_side.checks)
 
         facts = ReleaseFacts(
             declaring_released_at=declaring_side.released_at,
             declared_about_released_at=declared_side.released_at,
-            declared_about_eol_at=declared_side.eol_at,
+            declared_about_eol=declared_side.eol,
             declaring_yanked=declaring_side.yanked,
             declared_about_yanked=declared_side.yanked,
         )
-        claims = (*registry_claims, *curated_claims)
         verdict = evaluate(
             EvaluationInput(
                 relation=relation,
                 claims=claims,
                 facts=facts,
                 lookups=checks,
-                curated=self._coverage(entry, relation.declaring),
                 declaring_release_found=declaring_side.found,
                 declared_about_release_found=declared_side.found,
             )
@@ -256,12 +275,10 @@ class CompatibilityService:
     ) -> GetCompatibilityContextResult:
         """Return comparison material for one release. This tool never judges."""
         side = await self._collect_one_with_budget(target, role="declaring")
-        entry = self.pack.lookup(target)
-        checks = (*side.checks, self._pack_check(entry, target))
+        checks = side.checks
 
         evidence: list[Evidence] = []
         constraints: list[ContextConstraint] = []
-        changes: list[ContextChange] = []
         marker_guarded = False
         extra_guarded = False
 
@@ -274,26 +291,13 @@ class CompatibilityService:
                 if constraint is not None:
                     constraints.append(constraint)
 
-        if entry is not None:
-            curated_claims, curated_evidence = self._curated_claims(entry, None)
-            evidence.extend(curated_evidence)
-            for claim in curated_claims:
-                constraint, _ = _claim_to_constraint(claim)
-                if constraint is not None:
-                    constraints.append(constraint)
-            change_items, change_evidence = self._curated_changes(entry)
-            evidence.extend(change_evidence)
-            changes.extend(change_items)
-
         outcome = build_context(
             ContextInput(
                 target=target,
                 release_found=side.found,
                 constraints=tuple(constraints),
-                changes=tuple(changes),
                 evidence=tuple(evidence),
                 lookups=checks,
-                curated=self._coverage(entry, target),
                 marker_guarded=marker_guarded,
                 extra_guarded=extra_guarded,
             )
@@ -359,18 +363,25 @@ class CompatibilityService:
         return self._timed_out(target, role)
 
     def _timed_out(self, target: Target, role: LookupRole) -> _Collected:
-        """Represent an exhausted call-level budget as a required lookup failure."""
+        """Represent an exhausted call-level budget as a required lookup failure.
+
+        Only the required source is reported. Which of a runtime's two documents was still
+        in flight when the budget ran out is not knowable here, and the optional one is not
+        what decided the outcome: one failed required lookup already means
+        ``lookup_failed``, and naming a second source the server cannot prove it opened
+        would put an invented row in ``sources_checked``.
+        """
         match target:
             case PyPITarget() | NpmTarget():
                 source = self._adapter_for(target).source_id
             case PythonRuntimeTarget() | NodeRuntimeTarget():
-                source = self.runtimes.source_id_for(target)
+                source = index_source_id(target)
             case _:
                 assert_never(target)
         return _Collected(
             document=None,
             released_at=None,
-            eol_at=None,
+            eol=EolUnavailable(detail="timeout"),
             yanked=None,
             found=False,
             checks=(
@@ -388,56 +399,102 @@ class CompatibilityService:
     async def _collect_one(self, target: Target, *, role: LookupRole) -> _Collected:
         match target:
             case PythonRuntimeTarget() | NodeRuntimeTarget():
-                return self._collect_runtime(target, role=role)
+                return await self._collect_runtime(target, role=role)
             case PyPITarget() | NpmTarget():
                 return await self._collect_registry(target, role=role)
             case _:
                 assert_never(target)
 
-    def _collect_runtime(self, target: Target, *, role: LookupRole) -> _Collected:
-        source = self.runtimes.source_id_for(target)
-        found = self.runtimes.fetch_release(target)
-        match found:
-            case RuntimeReleaseFound(released_at=released_at, eol_at=eol_at):
-                return _Collected(
-                    document=None,
-                    released_at=released_at,
-                    eol_at=eol_at,
-                    yanked=None,
-                    found=True,
-                    checks=(
-                        SourceCheck(
-                            source=source, target=target, role=role, outcome="ok"
-                        ),
-                    ),
-                )
-            case RuntimeReleaseMissing():
-                return _Collected(
-                    document=None,
-                    released_at=None,
-                    eol_at=None,
-                    yanked=None,
-                    found=False,
-                    checks=(
-                        SourceCheck(
-                            source=source, target=target, role=role, outcome="not_found"
-                        ),
-                    ),
-                )
+    async def _collect_runtime(self, target: Target, *, role: LookupRole) -> _Collected:
+        """Read a runtime release from its official index, and its line's end of life.
+
+        The support schedule is only consulted for the side the declaration is *about*:
+        the end-of-life fact exists to bound an open-ended gate declared by the other
+        side, and ``get_compatibility_context`` reports declarations rather than judging
+        them. Fetching it anywhere else would put a row in ``sources_checked`` for a
+        document nothing in the response rests on.
+        """
+        if role == "declared_about":
+            # Structured: both documents are fetched under one scope, and a failure in one
+            # cancels the other rather than leaving it running past the response.
+            async with asyncio.TaskGroup() as group:
+                index_task = group.create_task(self._runtime_index(target))
+                lifecycle_task = group.create_task(self._runtime_lifecycle(target))
+            index = index_task.result()
+            lifecycle: RuntimeLifecycleLookup | None = lifecycle_task.result()
+        else:
+            index = await self._runtime_index(target)
+            lifecycle = None
+
+        release = select_release(index, target)
+        checks = [index_check(target, release, role=role)]
+        if lifecycle is not None:
+            checks.append(lifecycle_check(target, lifecycle, role=role))
+
+        match release:
+            case RuntimeReleaseFound(released_at=released_at):
+                released, found = released_at, True
+            case RuntimeReleaseAbsent() | RuntimeReleaseUnavailable():
+                released, found = None, False
             case _:
-                assert_never(found)
+                assert_never(release)
+
+        return _Collected(
+            document=None,
+            released_at=released,
+            eol=select_eol(lifecycle, target),
+            yanked=None,
+            found=found,
+            checks=tuple(checks),
+        )
+
+    async def _runtime_index(self, target: Target) -> RuntimeIndexLookup:
+        return await self._cached_document(
+            self._index_cache,
+            index_source_id(target),
+            lambda: self.runtimes.fetch_index(target),
+        )
+
+    async def _runtime_lifecycle(self, target: Target) -> RuntimeLifecycleLookup:
+        return await self._cached_document(
+            self._lifecycle_cache,
+            lifecycle_source_id(target),
+            lambda: self.runtimes.fetch_lifecycle(target),
+        )
+
+    @staticmethod
+    async def _cached_document[T](
+        cache: TtlCache[SourceId, T],
+        key: SourceId,
+        fetch: Callable[[], Awaitable[T]],
+    ) -> T:
+        """Return the cached official document for ``key``, fetching it when absent.
+
+        Only successes are cached. A runtime document is keyed by source rather than by
+        release, so caching a failure would replay one bad minute to *every* runtime
+        question for the whole TTL - unlike a registry entry, whose key confines a cached
+        failure to the one release that failed.
+
+        ``fetch`` is a factory rather than an awaitable so that a cache hit costs nothing:
+        the request is never even constructed.
+        """
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        document = await fetch()
+        if not isinstance(document, RuntimeSourceFailed):
+            cache.set(key, document)
+        return document
 
     async def _collect_registry(
         self, target: Target, *, role: LookupRole
     ) -> _Collected:
         adapter = self._adapter_for(target)
-        key: CacheKey = (
+        key: ReleaseCacheKey = (
             adapter.source_id,
             namespace_of(target),
             str(name_of(target)),
             str(version_of(target)),
-            # A pack change really does change the evidence, so it invalidates the cache.
-            self.pack.pack_version,
         )
         cached = self._cache.get(key)
         lookup = cached if cached is not None else await adapter.fetch_release(target)
@@ -449,7 +506,7 @@ class CompatibilityService:
                 return _Collected(
                     document=lookup,
                     released_at=lookup.released_at,
-                    eol_at=None,
+                    eol=EolNotApplicable(),
                     yanked=lookup.yanked,
                     found=True,
                     checks=(
@@ -465,7 +522,7 @@ class CompatibilityService:
                 return _Collected(
                     document=None,
                     released_at=None,
-                    eol_at=None,
+                    eol=EolNotApplicable(),
                     yanked=None,
                     found=False,
                     checks=(
@@ -481,7 +538,7 @@ class CompatibilityService:
                 return _Collected(
                     document=None,
                     released_at=None,
-                    eol_at=None,
+                    eol=EolNotApplicable(),
                     yanked=None,
                     found=False,
                     checks=(
@@ -514,58 +571,6 @@ class CompatibilityService:
             case _:
                 # Runtime targets never reach a registry adapter; the caller dispatches first.
                 raise TypeError(f"no registry adapter for {target!r}")
-
-    # ----------------------------------------------------------------------------------
-    # Curated pack
-    # ----------------------------------------------------------------------------------
-
-    def _curated_claims(
-        self, entry: PackEntry | None, declared_about: TargetId | None
-    ) -> tuple[tuple[Claim, ...], tuple[Evidence, ...]]:
-        if entry is None:
-            return (), ()
-        claims, evidence = statement_claims(entry, self.pack.pack_version)
-        if declared_about is not None:
-            claims = tuple(
-                claim for claim in claims if claim.declared_about == declared_about
-            )
-        return claims, evidence
-
-    def _curated_changes(
-        self, entry: PackEntry
-    ) -> tuple[tuple[ContextChange, ...], tuple[Evidence, ...]]:
-        evidence = change_evidence(entry, self.pack.pack_version)
-        changes = tuple(
-            ContextChange(
-                category=change.category,
-                area=change.area,
-                summary=change.summary,
-                evidence_ids=(item.id,),
-            )
-            for change, item in zip(entry.changes, evidence, strict=True)
-        )
-        return changes, evidence
-
-    def _coverage(self, entry: PackEntry | None, target: Target) -> CuratedCoverage:
-        if entry is None:
-            return CuratedCoverage(entry_present=False, verified_for_version=False)
-        return CuratedCoverage(
-            entry_present=True,
-            verified_for_version=self.pack.verified_for(entry, target),
-        )
-
-    def _pack_check(self, entry: PackEntry | None, target: Target) -> SourceCheck:
-        # The pack is always consulted, and "consulted, nothing there" is a real answer -
-        # it is what separates `curated_pack_missing` from a failed lookup. It is looked up
-        # for the declaring target only: the pack records what a release states about
-        # others, so there is nothing to ask it about the counterpart.
-        return SourceCheck(
-            source="curated_pack",
-            target=target,
-            role="declaring",
-            outcome="ok" if entry is not None else "not_found",
-            required=False,
-        )
 
     # ----------------------------------------------------------------------------------
     # Helpers
@@ -621,8 +626,8 @@ def _claim_to_constraint(
                     counterpart=claim.declared_about,
                     version_expression=claim.expression,
                     version_scheme=claim.scheme,
-                    # Curated statements carry no PEP 508 marker; the reviewer records the
-                    # range that applies, not one guarded by an environment.
+                    # A support statement carries no PEP 508 marker: `engines.node` is a
+                    # bare range, not one guarded by an environment.
                     condition=None,
                     explanation=(
                         "Declared as a supported range."

@@ -8,9 +8,9 @@ are the reasons a verdict could not be reached, and mixing them into one "caveat
 would make an honest ``unknown`` indistinguishable from hedging.
 
 The third set is the newest and the one that carries the most weight. A ``limitation`` is
-coverage the server did not have (``curated_pack_missing`` is true of almost every
-response today); a :data:`DecisionCause` is the thing that *produced* this particular
-``unknown``. Reading the first as if it were the second is exactly the confusion this
+coverage the server did not have (an optional source that could not be read, a claim whose
+marker was never settled); a :data:`DecisionCause` is the thing that *produced* this
+particular ``unknown``. Reading the first as if it were the second is exactly the confusion this
 split removes - and it is why a cause carries its own evidence ids and, where one exists,
 the verbatim marker, rather than a bare code the caller has to re-interpret.
 """
@@ -54,9 +54,10 @@ __all__ = [
 # the unknown path: a target can be named by both a guarded and an unguarded declaration,
 # and then the verdict is decided by the unguarded one while the guarded one remains
 # unverified scope. `Supported` carries no causes, so this is the only place that says so.
+# `source_unavailable` is the same shape for an *optional* lookup: the runtime lifecycle
+# source is optional, so a response can be decided without it while still saying it was
+# not read.
 type LimitationCode = Literal[
-    "curated_pack_missing",
-    "curated_not_verified_for_version",
     "marker_guarded_claim",
     "extra_guarded_claim",
     "source_unavailable",
@@ -69,8 +70,6 @@ type NoticeCode = Literal[
 ]
 
 LIMITATION_CODES: Final[tuple[LimitationCode, ...]] = (
-    "curated_pack_missing",
-    "curated_not_verified_for_version",
     "marker_guarded_claim",
     "extra_guarded_claim",
     "source_unavailable",
@@ -128,6 +127,7 @@ type GuardKind = Literal["environment_marker", "extra_marker"]
 type UnprovenKind = Literal[
     "open_upper_bound",
     "stale_lower_bound",
+    "lifecycle_unavailable",
     "tier_c_only",
     "claim_outside_range",
     "uncomparable_claim",
@@ -137,13 +137,16 @@ type CauseKind = Literal["conditional_claim"] | UnprovenKind
 
 # Priority order, most actionable to the caller first, and the tie-break that makes the
 # rendered summary deterministic. A conditional claim leads because the caller can settle
-# it by naming an environment or an extra; the two bound rules and the tier-C rule follow
-# because they describe evidence that exists but stops short; the last two report claims
-# that were read and decided nothing.
+# it by naming an environment or an extra; the two bound rules follow because they describe
+# evidence that exists but stops short. `lifecycle_unavailable` sits next to them because
+# it is the same open-ended gate with the *other* half of the check missing, and it must
+# never be silently outranked into a decided verdict. The last three report claims that
+# were read and decided nothing.
 CAUSE_KINDS: Final[tuple[CauseKind, ...]] = (
     "conditional_claim",
     "open_upper_bound",
     "stale_lower_bound",
+    "lifecycle_unavailable",
     "tier_c_only",
     "claim_outside_range",
     "uncomparable_claim",

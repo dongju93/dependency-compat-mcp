@@ -8,10 +8,13 @@ therefore fails this test until a human agrees to the new wording.
 
 import pytest
 
-from dependency_compat_mcp.domain.claims import ReleaseFacts, SourceCheck
+from dependency_compat_mcp.domain.claims import (
+    EolNotApplicable,
+    ReleaseFacts,
+    SourceCheck,
+)
 from dependency_compat_mcp.domain.context import (
     ContextAvailable,
-    ContextChange,
     ContextConstraint,
     ContextUnknown,
 )
@@ -24,7 +27,6 @@ from dependency_compat_mcp.domain.diagnostics import (
 )
 from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.evaluate import (
-    CuratedCoverage,
     EvaluationInput,
     Supported,
     Unknown,
@@ -82,6 +84,8 @@ EXPECTED_TEMPLATES: tuple[str, ...] = (
     "so support for it was never stated.",
     "{declared_about} had already reached end of life when {declaring} was released, "
     "so {declaring}'s {rule} never stated support for it.",
+    "{declaring}'s {rule} has no upper bound and {declared_about}'s official support "
+    "schedule could not be read, so whether it was still supported was not checked.",
     "{declaring} only enumerates {declared_about} in classifiers, "
     "which cannot carry a verdict on their own.",
     "{declaring}'s stated range does not cover {declared_about}, "
@@ -90,10 +94,7 @@ EXPECTED_TEMPLATES: tuple[str, ...] = (
     "under a single version scheme.",
     " {additional_count} further cause(s) are listed in decision_causes.",
     " The arguments were read in reverse: the declaration comes from {declaring}.",
-    "{target}: {constraint_count} constraint(s) and {change_count} change(s), "
-    "all from registry metadata.",
-    "{target}: {constraint_count} constraint(s) and {change_count} change(s), "
-    "including reviewed official statements.",
+    "{target}: {constraint_count} declared constraint(s) from registry metadata.",
     "No release was found for {target}, so no compatibility context was collected.",
     "A required source for {target} could not be read, "
     "so no compatibility context was collected.",
@@ -312,45 +313,14 @@ def _constraint() -> ContextConstraint:
     )
 
 
-def _change() -> ContextChange:
-    return ContextChange(
-        category="removal",
-        area="removed_api",
-        summary="The API was removed in this release.",
-        evidence_ids=("ev-2",),
-    )
-
-
-def test_registry_only_context_says_so() -> None:
+def test_an_available_context_counts_the_constraints_it_carries() -> None:
     summary = summarise_context(
-        ContextAvailable(
-            depth="registry_only",
-            constraints=(_constraint(),),
-            changes=(),
-            notices=(),
-            limitations=(),
-        ),
+        ContextAvailable(constraints=(_constraint(),), notices=(), limitations=()),
         FRAMEWORK,
     )
     assert summary == (
-        "pypi:example-framework 5.2: 1 constraint(s) and 0 change(s), "
-        "all from registry metadata."
+        "pypi:example-framework 5.2: 1 declared constraint(s) from registry metadata."
     )
-
-
-def test_curated_context_says_so() -> None:
-    summary = summarise_context(
-        ContextAvailable(
-            depth="registry_and_curated",
-            constraints=(_constraint(),),
-            changes=(_change(),),
-            notices=(),
-            limitations=(),
-        ),
-        FRAMEWORK,
-    )
-    assert summary.endswith("including reviewed official statements.")
-    assert "1 constraint(s) and 1 change(s)" in summary
 
 
 @pytest.mark.parametrize(
@@ -360,7 +330,6 @@ def test_every_context_reason_has_a_summary(reason: str) -> None:
     summary = summarise_context(
         ContextUnknown(
             reason=reason,  # pyrefly: ignore[bad-argument-type]
-            depth="registry_only",
             notices=(),
             limitations=(),
         ),
@@ -412,11 +381,10 @@ def _template_skeletons() -> set[str]:
 
 def test_every_generated_verdict_summary_instantiates_a_pinned_template() -> None:
     skeletons = _template_skeletons()
-    curated = CuratedCoverage(entry_present=True, verified_for_version=True)
     release_facts = ReleaseFacts(
         declaring_released_at=None,
         declared_about_released_at=None,
-        declared_about_eol_at=None,
+        declared_about_eol=EolNotApplicable(),
         declaring_yanked=None,
         declared_about_yanked=None,
     )
@@ -434,7 +402,6 @@ def test_every_generated_verdict_summary_instantiates_a_pinned_template() -> Non
                         outcome="ok",
                     ),
                 ),
-                curated=curated,
                 declaring_release_found=True,
                 declared_about_release_found=True,
             )

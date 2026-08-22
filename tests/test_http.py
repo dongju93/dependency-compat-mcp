@@ -103,8 +103,25 @@ def test_build_url_rejects_a_host_outside_the_allowlist() -> None:
     assert isinstance(caught.value, InvariantViolation)
 
 
-def test_allowlist_is_exactly_the_two_registries() -> None:
-    assert frozenset({"pypi.org", "registry.npmjs.org"}) == ALLOWED_HOSTS
+def test_the_allowlist_is_exactly_the_six_official_sources() -> None:
+    """Pinned, not merely documented: widening it widens what the server treats as fact.
+
+    Two package registries, two runtime release indexes, two runtime support schedules.
+    Every one is the publisher of record for what is read from it.
+    """
+    assert (
+        frozenset(
+            {
+                "pypi.org",
+                "registry.npmjs.org",
+                "www.python.org",
+                "nodejs.org",
+                "peps.python.org",
+                "raw.githubusercontent.com",
+            }
+        )
+        == ALLOWED_HOSTS
+    )
 
 
 # --------------------------------------------------------------------------------------

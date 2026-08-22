@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from dependency_compat_mcp.curated.loader import CuratedPack
+from dependency_compat_mcp.adapters.runtimes import PYTHON_RELEASE_INDEX_URL
 from dependency_compat_mcp.domain.targets import parse_target
 from tests.conftest import (
     FakeFetcher,
@@ -26,6 +26,7 @@ from tests.conftest import (
     npm_url,
     pypi_release,
     pypi_url,
+    python_release_index,
 )
 
 PAYLOADS: dict[str, Any] = {
@@ -175,21 +176,27 @@ def test_evidence_order_does_not_depend_on_collection_order() -> None:
     assert forward == sorted(forward, key=tier_a_first)
 
 
-def test_a_pack_change_changes_the_answer_and_the_cache_key(
-    curated_fixture_pack: CuratedPack,
-) -> None:
-    """`pack_version` is inside the cache key because a pack edit really is new evidence."""
+def test_an_upstream_index_change_changes_the_answer() -> None:
+    """Determinism is over the *facts*, not over time: new upstream data is a new fact.
 
-    async def run(pack: CuratedPack | None) -> dict[str, Any]:
-        service = build_service(FakeFetcher(payloads=PAYLOADS), pack=pack)
-        result = await service.get_compatibility_context(
-            parse_target("pypi", "example-framework", "5.2")
+    The cache no longer carries a version tag to invalidate, because there is no committed
+    evidence state to version. What makes an answer change is the official document
+    changing, and a fresh service sees the change immediately.
+    """
+
+    async def run(index: object) -> dict[str, Any]:
+        payloads = dict(PAYLOADS) | {PYTHON_RELEASE_INDEX_URL: index}
+        service = build_service(FakeFetcher(payloads=payloads))
+        result = await service.check_compatibility(
+            parse_target("pypi", "django", "5.2"),
+            parse_target("runtime", "python", "3.13.5"),
         )
         return result.model_dump(mode="json")
 
-    without = asyncio.run(run(None))
-    with_pack = asyncio.run(run(curated_fixture_pack))
+    before = asyncio.run(run(python_release_index({"3.13.0": "2024-10-07"})))
+    after = asyncio.run(
+        run(python_release_index({"3.13.0": "2024-10-07", "3.13.5": "2026-02-03"}))
+    )
 
-    assert without["depth"] == "registry_only"
-    assert with_pack["depth"] == "registry_and_curated"
-    assert any(item["provenance"].get("pack_version") for item in with_pack["evidence"])
+    assert before["reason"] == "release_not_found"
+    assert after["verdict"] == "supported"

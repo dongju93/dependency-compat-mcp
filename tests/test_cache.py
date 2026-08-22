@@ -2,7 +2,7 @@
 
 The properties that matter are the ones 01/03 rely on: an entry expires on elapsed time
 and never comes back, memory is bounded regardless of how many distinct package names
-arrive, and the key is whatever the caller says it is - including ``pack_version``.
+arrive, and the key is whatever the caller says it is.
 """
 
 import time
@@ -107,16 +107,17 @@ def test_clear_drops_everything() -> None:
     assert len(cache) == 0
 
 
-def test_the_pack_version_belongs_to_the_caller_s_key() -> None:
-    """03: a pack release changes the evidence, so it must change the key.
+def test_the_identity_of_a_document_belongs_to_the_caller_s_key() -> None:
+    """The cache promises only that different keys are different entries.
 
-    The cache does not know about packs; it only promises that different keys are
-    different entries. This test pins the contract the caller depends on.
+    Which fields identify a document is the caller's decision - a registry release is
+    keyed by source and exact version, an official runtime index by its source alone.
+    This test pins the contract that decision depends on.
     """
     cache: TtlCache[tuple[str, str, str, str], str] = TtlCache(ttl_seconds=60)
-    old = ("pypi", "sample-project", "5.2.1", "2026.07.1")
-    new = ("pypi", "sample-project", "5.2.1", "2026.08.1")
-    cache.set(old, "verdict from the old pack")
+    old = ("pypi_json", "pypi", "sample-project", "5.2.1")
+    new = ("pypi_json", "pypi", "sample-project", "5.3.0")
+    cache.set(old, "the 5.2.1 document")
     assert cache.get(new) is None
 
 

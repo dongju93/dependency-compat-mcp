@@ -107,6 +107,10 @@ _STALE_LOWER_BOUND: Final = (
     "{declared_about} had already reached end of life when {declaring} was released, "
     "so {declaring}'s {rule} never stated support for it."
 )
+_LIFECYCLE_UNAVAILABLE: Final = (
+    "{declaring}'s {rule} has no upper bound and {declared_about}'s official support "
+    "schedule could not be read, so whether it was still supported was not checked."
+)
 _TIER_C_ONLY: Final = (
     "{declaring} only enumerates {declared_about} in classifiers, "
     "which cannot carry a verdict on their own."
@@ -128,6 +132,7 @@ _ADDITIONAL_CAUSES: Final = (
 _UNPROVEN_TEMPLATES: Final[dict[UnprovenKind, str]] = {
     "open_upper_bound": _OPEN_UPPER_BOUND,
     "stale_lower_bound": _STALE_LOWER_BOUND,
+    "lifecycle_unavailable": _LIFECYCLE_UNAVAILABLE,
     "tier_c_only": _TIER_C_ONLY,
     "claim_outside_range": _CLAIM_OUTSIDE_RANGE,
     "uncomparable_claim": _UNCOMPARABLE_CLAIM,
@@ -146,13 +151,8 @@ _REVERSED_SUFFIX: Final = (
 # get_compatibility_context
 # --------------------------------------------------------------------------------------
 
-_CONTEXT_REGISTRY_ONLY: Final = (
-    "{target}: {constraint_count} constraint(s) and {change_count} change(s), "
-    "all from registry metadata."
-)
-_CONTEXT_REGISTRY_AND_CURATED: Final = (
-    "{target}: {constraint_count} constraint(s) and {change_count} change(s), "
-    "including reviewed official statements."
+_CONTEXT_AVAILABLE: Final = (
+    "{target}: {constraint_count} declared constraint(s) from registry metadata."
 )
 _CONTEXT_RELEASE_NOT_FOUND: Final = (
     "No release was found for {target}, so no compatibility context was collected."
@@ -176,13 +176,13 @@ TEMPLATES: Final[tuple[str, ...]] = (
     _CONDITIONAL_EXTRA,
     _OPEN_UPPER_BOUND,
     _STALE_LOWER_BOUND,
+    _LIFECYCLE_UNAVAILABLE,
     _TIER_C_ONLY,
     _CLAIM_OUTSIDE_RANGE,
     _UNCOMPARABLE_CLAIM,
     _ADDITIONAL_CAUSES,
     _REVERSED_SUFFIX,
-    _CONTEXT_REGISTRY_ONLY,
-    _CONTEXT_REGISTRY_AND_CURATED,
+    _CONTEXT_AVAILABLE,
     _CONTEXT_RELEASE_NOT_FOUND,
     _CONTEXT_LOOKUP_FAILED,
     _CONTEXT_EVIDENCE_NOT_FOUND,
@@ -304,16 +304,9 @@ def summarise_context(outcome: ContextOutcome, target: Target) -> str:
     """Render the one-line summary for a ``get_compatibility_context`` result."""
     rendered = render_target(target)
     match outcome:
-        case ContextAvailable(constraints=constraints, changes=changes, depth=depth):
-            template = (
-                _CONTEXT_REGISTRY_AND_CURATED
-                if depth == "registry_and_curated"
-                else _CONTEXT_REGISTRY_ONLY
-            )
-            return template.format(
-                target=rendered,
-                constraint_count=len(constraints),
-                change_count=len(changes),
+        case ContextAvailable(constraints=constraints):
+            return _CONTEXT_AVAILABLE.format(
+                target=rendered, constraint_count=len(constraints)
             )
         case ContextUnknown(reason=reason):
             match reason:

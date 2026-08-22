@@ -11,9 +11,13 @@ from typing import Any, override
 
 import pytest
 
-from dependency_compat_mcp.curated.loader import CuratedPack
+from dependency_compat_mcp.adapters.runtimes import (
+    NODE_RELEASE_INDEX_URL,
+    PYTHON_RELEASE_CYCLE_URL,
+    PYTHON_RELEASE_INDEX_URL,
+)
 from dependency_compat_mcp.domain.targets import parse_target
-from dependency_compat_mcp.infra.http import HttpResult
+from dependency_compat_mcp.infra.http import HttpFailed, HttpResult
 from dependency_compat_mcp.service import CompatibilityService
 from tests.conftest import (
     FakeFetcher,
@@ -22,6 +26,7 @@ from tests.conftest import (
     npm_url,
     pypi_release,
     pypi_url,
+    python_release_index,
 )
 
 
@@ -63,6 +68,13 @@ def _context(
 
 def _codes(result: dict[str, Any], key: str) -> list[str]:
     return [item["code"] for item in result[key]]
+
+
+def _row(result: dict[str, Any], source: str) -> dict[str, Any]:
+    """The single ``sources_checked`` row for ``source``."""
+    rows = [check for check in result["sources_checked"] if check["source"] == source]
+    assert len(rows) == 1, f"expected exactly one {source} row, got {rows}"
+    return rows[0]
 
 
 def _outcome(
@@ -110,8 +122,9 @@ def test_closed_upper_bound_admitting_the_version_is_supported() -> None:
     assert set(result["verdict_evidence_ids"]) <= {e["id"] for e in result["evidence"]}
     assert result["relation"]["rule"] == "requires_python"
     assert result["relation"]["direction"] == "as_given"
-    # The pack ships empty, so every real call says so rather than implying coverage.
-    assert "curated_pack_missing" in _codes(result, "limitations")
+    # Every source the answer rests on was read for this request, so an ordinary decided
+    # verdict has nothing to disclaim.
+    assert result["limitations"] == []
 
 
 def test_a_violated_installation_gate_is_unsupported() -> None:
@@ -376,38 +389,12 @@ def test_engines_node_is_a_statement_rather_than_an_installation_gate() -> None:
     assert statement["expression"] == ">=18"
 
 
-def test_a_curated_statement_contradicting_a_gate_loses_but_is_still_returned(
-    curated_fixture_pack: CuratedPack,
-) -> None:
-    """03's gate-first rule, and its companion: report the conflict, do not hide it."""
-    fetcher = FakeFetcher(
-        payloads={
-            pypi_url("example-framework", "5.2"): pypi_release(
-                "example-framework", "5.2", requires_python=">=3.8,<3.12"
-            )
-        }
-    )
-    service = build_service(fetcher, pack=curated_fixture_pack)
-    result = _check(
-        service,
-        ("pypi", "example-framework", "5.2"),
-        ("runtime", "python", "3.13.0"),
-    )
-
-    assert result["verdict"] == "unsupported"
-    assert "gate_contradicts_statement" in _codes(result, "notices")
-    # The contradicting policy stays in the catalogue but not in the verdict's own evidence.
-    curated = [e for e in result["evidence"] if e["provenance"]["kind"] == "curated"]
-    assert curated, "the opposing statement must not be dropped"
-    assert not set(result["verdict_evidence_ids"]) & {e["id"] for e in curated}
-
-
 # --------------------------------------------------------------------------------------
 # get_compatibility_context
 # --------------------------------------------------------------------------------------
 
 
-def test_registry_only_context_says_so_at_the_top_level() -> None:
+def test_a_release_declaring_constraints_has_an_available_context() -> None:
     fetcher = FakeFetcher(
         payloads={
             pypi_url("django", "5.2"): pypi_release(
@@ -421,8 +408,6 @@ def test_registry_only_context_says_so_at_the_top_level() -> None:
     result = _context(build_service(fetcher), ("pypi", "django", "5.2"))
 
     assert result["availability"] == "available"
-    assert result["depth"] == "registry_only"
-    assert result["changes"] == []
     assert {c["counterpart"]["name"] for c in result["constraints"]} == {
         "python",
         "asgiref",
@@ -431,42 +416,28 @@ def test_registry_only_context_says_so_at_the_top_level() -> None:
         assert constraint["evidence_ids"]
 
 
-def test_curated_context_reports_changes_and_the_deeper_depth(
-    curated_fixture_pack: CuratedPack,
-) -> None:
-    fetcher = FakeFetcher(
-        payloads={
-            pypi_url("example-framework", "5.2"): pypi_release(
-                "example-framework", "5.2", requires_python=">=3.10,<3.14"
-            )
-        }
-    )
-    result = _context(
-        build_service(fetcher, pack=curated_fixture_pack),
-        ("pypi", "example-framework", "5.2"),
-    )
-
-    assert result["depth"] == "registry_and_curated"
-    assert result["changes"], "a curated entry is the only source of changes"
-    assert any(e["provenance"]["kind"] == "curated" for e in result["evidence"])
-    assert all(change["evidence_ids"] for change in result["changes"])
-
-
-def test_curated_context_lookup_failure_is_a_normal_unknown(
-    curated_fixture_pack: CuratedPack,
-) -> None:
+def test_a_context_lookup_failure_is_a_normal_unknown() -> None:
     fetcher = FakeFetcher(failures={pypi_url("example-framework", "5.2"): "timeout"})
-    result = _context(
-        build_service(fetcher, pack=curated_fixture_pack),
-        ("pypi", "example-framework", "5.2"),
-    )
+    result = _context(build_service(fetcher), ("pypi", "example-framework", "5.2"))
 
     assert result["availability"] == "unknown"
     assert result["reason"] == "lookup_failed"
-    assert result["depth"] == "registry_only"
     assert result["constraints"] == []
-    assert result["changes"] == []
     assert result["evidence"] == []
+
+
+def test_a_runtime_context_reads_the_release_index_but_not_the_schedule() -> None:
+    """The support schedule bounds someone else's declaration; this tool declares nothing."""
+    fetcher = FakeFetcher()
+    result = _context(build_service(fetcher), ("runtime", "python", "3.13.0"))
+
+    assert result["availability"] == "unknown"
+    assert result["reason"] == "evidence_not_found"
+    assert _outcome(result, "python_release_index") == "ok"
+    assert PYTHON_RELEASE_CYCLE_URL not in fetcher.calls
+    assert {check["source"] for check in result["sources_checked"]} == {
+        "python_release_index"
+    }
 
 
 def test_context_collection_obeys_the_call_level_budget() -> None:
@@ -491,8 +462,6 @@ def test_a_release_with_no_material_is_unknown_rather_than_an_empty_available() 
     assert result["availability"] == "unknown"
     assert result["reason"] == "evidence_not_found"
     assert result["constraints"] == []
-    assert result["changes"] == []
-    assert result["depth"] == "registry_only"
 
 
 def test_the_server_never_claims_anything_about_a_codebase() -> None:
@@ -798,3 +767,202 @@ def test_context_constraints_carry_a_structured_condition() -> None:
     assert by_name["guarded"]["kind"] == "environment_marker"
     assert by_name["guarded"]["variables"] == ["sys_platform"]
     assert by_name["optional"]["kind"] == "extra_marker"
+
+
+# --------------------------------------------------------------------------------------
+# Runtime facts are fetched, not shipped
+# --------------------------------------------------------------------------------------
+
+
+def test_a_python_release_this_repository_never_heard_of_is_recognised() -> None:
+    """The whole point of dropping the snapshot: no repository edit makes 3.99.0 exist.
+
+    Nothing in this suite lists ``3.99.0``. It is answerable only because the official
+    index, read for this request, lists it.
+    """
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("app", "1.0"): pypi_release(
+                "app", "1.0", requires_python=">=3.10,<4.0"
+            ),
+            PYTHON_RELEASE_INDEX_URL: python_release_index({"3.99.0": "2031-10-07"}),
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.99.0"),
+    )
+
+    assert result["verdict"] == "supported"
+    assert _outcome(result, "python_release_index") == "ok"
+
+
+def test_a_version_absent_from_the_official_index_is_release_not_found() -> None:
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("app", "1.0"): pypi_release("app", "1.0", requires_python=">=3.10")
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.13.99"),
+    )
+
+    assert result["reason"] == "release_not_found"
+    assert _outcome(result, "python_release_index") == "not_found"
+
+
+def test_an_unreadable_release_index_is_lookup_failed_not_release_not_found() -> None:
+    """ "We could not look" must never be served as "it does not exist"."""
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("app", "1.0"): pypi_release("app", "1.0", requires_python=">=3.10")
+        },
+        failures={PYTHON_RELEASE_INDEX_URL: "timeout"},
+    )
+    result = _check(
+        build_service(fetcher),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.13.0"),
+    )
+
+    assert result["verdict"] == "unknown"
+    assert result["reason"] == "lookup_failed"
+    assert _outcome(result, "python_release_index") == "failed"
+
+
+def test_an_unreadable_support_schedule_blocks_a_confident_verdict() -> None:
+    """An optional failure does not fail the request, but it does not vanish either.
+
+    The gate is satisfied and open-ended, so ``supported`` would rest entirely on the
+    counterpart not having been end-of-life - the one thing the server could not check.
+    """
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "Django", "5.2", requires_python=">=3.10"
+            )
+        },
+        failures={PYTHON_RELEASE_CYCLE_URL: "transport_error"},
+    )
+    result = _check(
+        build_service(fetcher),
+        ("pypi", "django", "5.2"),
+        ("runtime", "python", "3.12.0"),
+    )
+
+    assert result["verdict"] == "unknown"
+    assert result["reason"] == "insufficient_evidence"
+    assert [cause["kind"] for cause in result["decision_causes"]] == [
+        "lifecycle_unavailable"
+    ]
+    assert "source_unavailable" in _codes(result, "limitations")
+    schedule = _row(result, "python_release_cycle")
+    assert (schedule["outcome"], schedule["required"], schedule["detail"]) == (
+        "failed",
+        False,
+        "transport_error",
+    )
+
+
+def test_an_unpublished_end_of_life_is_not_reported_as_a_failure() -> None:
+    """``3.12`` has only a month-precision date upstream; that is a fact, not a gap."""
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "Django", "5.2", requires_python=">=3.10"
+            )
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("pypi", "django", "5.2"),
+        ("runtime", "python", "3.12.0"),
+    )
+
+    assert result["verdict"] == "supported"
+    assert result["limitations"] == []
+    assert _outcome(result, "python_release_cycle") == "ok"
+
+
+def test_the_two_runtime_documents_are_reported_as_separate_rows() -> None:
+    """One row each: merged, the caller could not tell which document failed."""
+    fetcher = FakeFetcher(
+        payloads={
+            npm_url("react"): npm_packument("react", "19.1.1", engines={"node": ">=18"})
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("npm", "react", "19.1.1"),
+        ("runtime", "node", "22.17.0"),
+    )
+
+    sources = {check["source"] for check in result["sources_checked"]}
+    assert sources == {"npm_registry", "node_release_index", "node_release_schedule"}
+    assert _row(result, "node_release_index")["required"] is True
+    assert _row(result, "node_release_schedule")["required"] is False
+
+
+def test_an_official_document_is_fetched_once_and_answers_every_version() -> None:
+    """Keyed by source, not by release: one index serves every question about it."""
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "Django", "5.2", requires_python=">=3.10,<3.14"
+            )
+        }
+    )
+    service = build_service(fetcher)
+    _check(service, ("pypi", "django", "5.2"), ("runtime", "python", "3.13.0"))
+    _check(service, ("pypi", "django", "5.2"), ("runtime", "python", "3.12.0"))
+
+    assert fetcher.calls.count(PYTHON_RELEASE_INDEX_URL) == 1
+    assert fetcher.calls.count(PYTHON_RELEASE_CYCLE_URL) == 1
+
+
+def test_a_failed_official_document_is_not_cached() -> None:
+    """A source-keyed cache entry would replay one bad minute to every runtime question."""
+
+    class FlakyFetcher(FakeFetcher):
+        attempts: int = 0
+
+        @override
+        async def get_json(self, url: str) -> HttpResult:
+            if url == NODE_RELEASE_INDEX_URL:
+                self.attempts += 1
+                if self.attempts == 1:
+                    self.calls.append(url)
+                    return HttpFailed(url=url, detail="transport_error")
+            return await super().get_json(url)
+
+    fetcher = FlakyFetcher(
+        payloads={
+            npm_url("react"): npm_packument("react", "19.1.1", engines={"node": ">=18"})
+        }
+    )
+    service = build_service(fetcher)
+
+    first = _check(service, ("npm", "react", "19.1.1"), ("runtime", "node", "22.17.0"))
+    second = _check(service, ("npm", "react", "19.1.1"), ("runtime", "node", "22.17.0"))
+
+    assert first["reason"] == "lookup_failed"
+    assert second["verdict"] == "supported"
+
+
+def test_the_budget_cancels_both_runtime_documents_together() -> None:
+    """The two runtime fetches share a scope, so neither outlives the response."""
+    fetcher = SlowFetcher()
+    result = _check(
+        build_service(fetcher, request_budget_seconds=0.01),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.13.0"),
+    )
+
+    assert result["verdict"] == "unknown"
+    assert result["reason"] == "lookup_failed"
+    assert _outcome(result, "python_release_index") == "failed"
+    # The registry lookup plus both official runtime documents.
+    assert fetcher.cancelled == 3

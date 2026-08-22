@@ -3,8 +3,8 @@
 Two jobs live here and nowhere else.
 
 **Renumbering.** Adapters mint stable internal evidence ids (``pypi:requires_python``,
-``curated:pypi:django:statement:0``) so their output is deterministic and diffable. The
-public response uses ``evidence-1``, ``evidence-2``, ... in the 04 order. Doing the
+``npm:engines.node``) so their output is deterministic and diffable. The public response
+uses ``evidence-1``, ``evidence-2``, ... in the 04 order. Doing the
 renumbering in one place means the ids in ``verdict_evidence_ids``, ``notices[]`` and
 ``constraints[]`` cannot drift apart from the catalogue.
 
@@ -21,14 +21,12 @@ from collections.abc import Iterable, Mapping
 from typing import assert_never
 
 from dependency_compat_mcp.contracts.outputs import (
-    ChangeOut,
     CheckCompatibilityResult,
     ConditionalClaimOut,
     ConditionOut,
     ConstraintOut,
     ContextAvailableResult,
     ContextUnknownResult,
-    CuratedProvenanceOut,
     DecidedMarkerOut,
     DecisionCauseOut,
     EvidenceOut,
@@ -52,13 +50,11 @@ from dependency_compat_mcp.contracts.outputs import (
     VersionConstraintEvidenceOut,
 )
 from dependency_compat_mcp.domain.claims import (
-    Curated,
     Evidence,
     EvidenceId,
     Fetched,
     MarkerCondition,
     NarrativeEvidence,
-    Provenance,
     SourceCheck,
     VersionConstraintEvidence,
     evidence_sort_key,
@@ -66,7 +62,6 @@ from dependency_compat_mcp.domain.claims import (
 )
 from dependency_compat_mcp.domain.context import (
     ContextAvailable,
-    ContextChange,
     ContextConstraint,
     ContextOutcome,
     ContextUnknown,
@@ -120,18 +115,8 @@ def _target_id_out(identity: TargetId) -> TargetIdOut:
     return TargetIdOut(namespace=identity.namespace, name=str(identity.name))
 
 
-def _provenance_out(
-    provenance: Provenance,
-) -> FetchedProvenanceOut | CuratedProvenanceOut:
-    match provenance:
-        case Fetched(retrieved_at=retrieved_at):
-            return FetchedProvenanceOut(retrieved_at=retrieved_at)
-        case Curated(reviewed_at=reviewed_at, pack_version=pack_version):
-            return CuratedProvenanceOut(
-                reviewed_at=reviewed_at, pack_version=pack_version
-            )
-        case _:
-            assert_never(provenance)
+def _provenance_out(provenance: Fetched) -> FetchedProvenanceOut:
+    return FetchedProvenanceOut(retrieved_at=provenance.retrieved_at)
 
 
 def _relation_out(resolution: RelationResolution) -> RelationOut:
@@ -378,15 +363,6 @@ def _constraint_out(
     )
 
 
-def _change_out(change: ContextChange, mapping: Mapping[EvidenceId, str]) -> ChangeOut:
-    return ChangeOut(
-        category=change.category,
-        area=change.area,
-        summary=change.summary,
-        evidence_ids=tuple(mapping[i] for i in change.evidence_ids),
-    )
-
-
 def build_context_result(
     *,
     target: Target,
@@ -397,16 +373,14 @@ def build_context_result(
 ) -> GetCompatibilityContextResult:
     """Assemble a ``get_compatibility_context`` response from domain values.
 
-    ``ContextUnknown`` has no ``constraints``/``changes`` fields at all - that is the point
-    of the sum type - so those are read only inside the branch where they exist. Reading
-    them up front would have made the "no material at all" path the one that crashes.
+    ``ContextUnknown`` has no ``constraints`` field at all - that is the point of the sum
+    type - so it is read only inside the branch where it exists. Reading it up front would
+    have made the "no material at all" path the one that crashes.
     """
     constraints: tuple[ContextConstraint, ...] = ()
-    changes: tuple[ContextChange, ...] = ()
     match outcome:
         case ContextAvailable():
             constraints = outcome.constraints
-            changes = outcome.changes
         case ContextUnknown():
             pass
         case _:
@@ -415,20 +389,16 @@ def build_context_result(
     referenced: set[EvidenceId] = set()
     for constraint in constraints:
         referenced.update(constraint.evidence_ids)
-    for change in changes:
-        referenced.update(change.evidence_ids)
     for notice in outcome.notices:
         referenced.update(notice.evidence_ids)
 
     evidence_out, mapping = _renumber(evidence, referenced)
     shared = {
-        "depth": outcome.depth,
         "target": target_out(target),
         "summary": summary,
         "constraints": tuple(
             _constraint_out(constraint, mapping) for constraint in constraints
         ),
-        "changes": tuple(_change_out(change, mapping) for change in changes),
         "notices": _notices_out(outcome.notices, mapping),
         "limitations": _limitations_out(outcome.limitations),
         "sources_checked": _sources_out(sources),

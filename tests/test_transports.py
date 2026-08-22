@@ -304,7 +304,9 @@ async def test_http_serves_the_same_tools_and_results(http_app: Starlette) -> No
             ),
         )
         assert context.status_code == 200
-        assert context.json()["result"]["structuredContent"]["depth"] == "registry_only"
+        structured = context.json()["result"]["structuredContent"]
+        assert structured["availability"] == "available"
+        assert structured["constraints"]
 
 
 @pytest.mark.anyio

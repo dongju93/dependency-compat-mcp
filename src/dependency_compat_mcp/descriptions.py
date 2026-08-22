@@ -14,9 +14,10 @@ against what ``tools/list`` actually publishes, and text duplicated at the regis
 site would drift from the text reviewed here.
 
 02 also fixes what must stay *out*: a supported-package list or coverage number (it goes
-stale on every pack release; ``depth`` and ``limitations`` report coverage per response),
-example JSON (the schema already carries it, and length buries the part used to decide
-whether to call), and performance claims (they do not inform that decision).
+stale the moment a registry changes; ``limitations`` and ``sources_checked`` report
+coverage per response), example JSON (the schema already carries it, and length buries
+the part used to decide whether to call), and performance claims (they do not inform that
+decision).
 
 :data:`REQUIRED_ELEMENTS` exists so that "all four elements are present, in order" is a
 machine-checked property instead of a review convention.
@@ -37,10 +38,11 @@ __all__ = [
 SERVER_INSTRUCTIONS: Final[str] = (
     "Answers compatibility questions about exact, already-pinned releases of PyPI "
     "packages, npm packages, and the Python and Node runtimes. Every answer is derived "
-    "from registry metadata and human-reviewed source packs, so each one carries the "
+    "from official sources read for that request - the package registries and the "
+    "publishers' own runtime release and support schedules - so each one carries the "
     "sources it rests on. Use check_compatibility for a two-sided question about a "
     "named pair, and get_compatibility_context to pull one release's declared "
-    "constraints and reviewed changes so you can compare them with code you already "
+    "constraints so you can compare them with code you already "
     "hold. The server never receives a repository, a file, or a search term, and it "
     "resolves neither ranges nor dependency graphs; a resolver is the right tool for "
     "those. An unknown result states that current evidence does not settle the "
@@ -66,8 +68,8 @@ CHECK_COMPATIBILITY_DESCRIPTION: Final[str] = (
 
 
 GET_COMPATIBILITY_CONTEXT_DESCRIPTION: Final[str] = (
-    "What does one exact release declare and state about compatibility? Call this when a "
-    "single target is pinned and you want its declared constraints and reviewed changes. "
+    "What does one exact release declare about compatibility? Call this when a "
+    "single target is pinned and you want the version constraints it declares. "
     "Do not call it with a version range, a repository path, or source text; the server "
     "never sees a codebase and compares nothing for you. This tool takes one target, so "
     "there is no argument order to get wrong; order matters only in check_compatibility, "

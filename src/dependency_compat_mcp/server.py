@@ -281,9 +281,10 @@ def _withdraw_unimplemented_capabilities(server: MCPServer) -> None:
 def build_server(service: CompatibilityService) -> MCPServer:
     """Register the two tools of 02 against ``service`` on the protocol of 01.
 
-    Only Tools are advertised. Resources and Prompts are deliberately absent (01): the
-    runtime tables and the curated pack are inputs to a tool, not separately published
-    resources, and a deterministic rule engine has nothing to prompt about.
+    Only Tools are advertised. Resources and Prompts are deliberately absent (01): this
+    server publishes no documents of its own - every fact in a response is fetched from an
+    official source for that request - and a deterministic rule engine has nothing to
+    prompt about.
     """
     _pin_protocol_version()
     server = MCPServer(

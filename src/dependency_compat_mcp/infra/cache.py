@@ -7,11 +7,12 @@ the same answer and a dropped connection does not discard warm entries.
 **The caller builds the key, and the caller is responsible for what belongs in it.** Two
 rules follow from 03:
 
-* ``(namespace, name, version)`` identifies a registry document.
-* ``pack_version`` must be part of any key whose value was derived from the curated pack.
-  A pack release really does change the evidence behind a verdict, so a cached value from
-  the previous pack is not merely stale, it is *wrong*. Conversely ``Fetched.retrieved_at``
-  must never enter a key: it changes on every fetch and would defeat the cache entirely.
+* A key must identify the *document* the value came from, and nothing narrower.
+  ``(source, namespace, name, version)`` identifies a registry release; an official
+  runtime index or support schedule answers every version, so it is keyed by its source
+  alone rather than re-fetched per release.
+* ``Fetched.retrieved_at`` must never enter a key: it changes on every fetch and would
+  defeat the cache entirely.
 
 This module deliberately has no async surface. Entries are plain values, every operation
 is O(1) and non-blocking, so there is no await point at which a task could be cancelled
@@ -86,7 +87,7 @@ class TtlCache[K: Hashable, V]:
             del self._entries[oldest]
 
     def clear(self) -> None:
-        """Drop every entry. Used when the curated pack is reloaded, and by tests."""
+        """Drop every entry. Used by tests, and by anything that invalidates wholesale."""
         self._entries.clear()
 
     def __len__(self) -> int:

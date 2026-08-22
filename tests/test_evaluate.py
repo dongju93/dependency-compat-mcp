@@ -16,6 +16,11 @@ from dependency_compat_mcp.domain.claims import (
     Claim,
     CompatibilityStatement,
     Corroboration,
+    EolNotApplicable,
+    EolPublished,
+    EolStatus,
+    EolUnavailable,
+    EolUnpublished,
     InstallationGate,
     MarkerCondition,
     MarkerDecidability,
@@ -27,7 +32,6 @@ from dependency_compat_mcp.domain.diagnostics import (
     CAUSE_KINDS,
     ClaimGuard,
     ConditionalClaim,
-    Limitation,
     Notice,
     UnprovenClaim,
     cause_evidence_ids,
@@ -35,7 +39,6 @@ from dependency_compat_mcp.domain.diagnostics import (
 )
 from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.evaluate import (
-    CuratedCoverage,
     EvaluationInput,
     Supported,
     Unknown,
@@ -61,8 +64,6 @@ from dependency_compat_mcp.domain.versions import bounded_above
 FRAMEWORK = parse_target("pypi", "example-framework", "5.2")
 LIBRARY = parse_target("pypi", "example-library", "2.0")
 PYTHON = parse_target("runtime", "python", "3.13")
-
-FULLY_CURATED = CuratedCoverage(entry_present=True, verified_for_version=True)
 
 
 def check(
@@ -103,20 +104,23 @@ def moment(year: int) -> datetime:
 
 DECLARED_AT = moment(2025)
 COUNTERPART_AT = moment(2024)
+# A package counterpart has no support lifecycle at all. Held as a module-level value
+# because it is the default for `facts()` and a call there would be evaluated once anyway.
+NO_LIFECYCLE = EolNotApplicable()
 
 
 def facts(
     *,
     declaring_released_at: datetime | None = DECLARED_AT,
     declared_about_released_at: datetime | None = COUNTERPART_AT,
-    declared_about_eol_at: datetime | None = None,
+    declared_about_eol: EolStatus = NO_LIFECYCLE,
     declaring_yanked: YankedInfo | None = None,
     declared_about_yanked: YankedInfo | None = None,
 ) -> ReleaseFacts:
     return ReleaseFacts(
         declaring_released_at=declaring_released_at,
         declared_about_released_at=declared_about_released_at,
-        declared_about_eol_at=declared_about_eol_at,
+        declared_about_eol=declared_about_eol,
         declaring_yanked=declaring_yanked,
         declared_about_yanked=declared_about_yanked,
     )
@@ -183,7 +187,6 @@ def evaluation(
     relation: ResolvedRelation = PYTHON_RELATION,
     release_facts: ReleaseFacts | None = None,
     lookups: tuple[SourceCheck, ...] = OK_LOOKUPS,
-    curated: CuratedCoverage = FULLY_CURATED,
     declaring_release_found: bool = True,
     declared_about_release_found: bool = True,
 ) -> EvaluationInput:
@@ -192,7 +195,6 @@ def evaluation(
         claims=claims,
         facts=release_facts if release_facts is not None else facts(),
         lookups=lookups,
-        curated=curated,
         declaring_release_found=declaring_release_found,
         declared_about_release_found=declared_about_release_found,
     )
@@ -228,7 +230,7 @@ def test_optional_lookup_failure_is_a_limitation_not_a_verdict() -> None:
     verdict = evaluate(
         evaluation(
             gate(),
-            lookups=(check("curated_pack", "failed", required=False),),
+            lookups=(check("python_release_cycle", "failed", required=False),),
         )
     )
     assert isinstance(verdict, Supported)
@@ -239,7 +241,7 @@ def test_skipped_required_lookup_is_a_limitation() -> None:
     verdict = evaluate(
         evaluation(
             gate(),
-            lookups=(check("curated_pack", "skipped"),),
+            lookups=(check("python_release_cycle", "skipped"),),
         )
     )
     assert codes(verdict) == ("source_unavailable",)
@@ -453,7 +455,7 @@ def test_counterpart_already_eol_at_release_time_is_unknown() -> None:
             gate(">=3.10"),
             release_facts=facts(
                 declared_about_released_at=moment(2020),
-                declared_about_eol_at=moment(2024),
+                declared_about_eol=EolPublished(at=moment(2024)),
             ),
         )
     )
@@ -471,7 +473,7 @@ def test_eol_counterpart_with_corroboration_is_supported() -> None:
             corroboration("3.13"),
             release_facts=facts(
                 declared_about_released_at=moment(2020),
-                declared_about_eol_at=moment(2024),
+                declared_about_eol=EolPublished(at=moment(2024)),
             ),
         )
     )
@@ -484,7 +486,7 @@ def test_eol_after_the_declaring_release_does_not_fire() -> None:
             gate(">=3.10"),
             release_facts=facts(
                 declared_about_released_at=moment(2020),
-                declared_about_eol_at=moment(2030),
+                declared_about_eol=EolPublished(at=moment(2030)),
             ),
         )
     )
@@ -500,13 +502,14 @@ def test_unknown_release_dates_do_not_fire_the_temporal_branches() -> None:
 
 
 def test_pypi_by_pypi_has_no_eol_data_and_short_circuits_to_supported() -> None:
-    """No release table exists for a package pair, so the floor check cannot fire."""
+    """A package pair has no support lifecycle, so the floor check cannot fire."""
     verdict = evaluate(
         evaluation(
             gate(">=1.0", about=LIBRARY),
             relation=DIST_RELATION,
             release_facts=facts(
-                declared_about_released_at=moment(2020), declared_about_eol_at=None
+                declared_about_released_at=moment(2020),
+                declared_about_eol=EolNotApplicable(),
             ),
         )
     )
@@ -602,25 +605,86 @@ def test_reversed_direction_maps_a_yanked_declared_about_to_the_subject() -> Non
     assert verdict.notices == (Notice("subject_yanked"),)
 
 
-def test_missing_curated_entry_is_reported_on_a_supported_verdict() -> None:
+def test_an_unreadable_lifecycle_source_never_yields_a_supported_verdict() -> None:
+    """A confident verdict must not rest on a check the server could not make.
+
+    The gate is satisfied and open-ended, so the only thing standing between this pair and
+    ``supported`` is whether the counterpart was already end-of-life - and that is exactly
+    what could not be read.
+    """
     verdict = evaluate(
         evaluation(
-            gate(),
-            curated=CuratedCoverage(entry_present=False, verified_for_version=False),
+            gate(">=3.10"),
+            release_facts=facts(
+                declared_about_released_at=moment(2020),
+                declared_about_eol=EolUnavailable(detail="timeout"),
+            ),
+            lookups=(check("python_release_cycle", "failed", required=False),),
+        )
+    )
+    assert isinstance(verdict, Unknown)
+    assert verdict.reason == "insufficient_evidence"
+    assert verdict.causes == (
+        UnprovenClaim(kind="lifecycle_unavailable", evidence_ids=("ev-gate",)),
+    )
+    assert codes(verdict) == ("source_unavailable",)
+
+
+def test_an_unpublished_end_of_life_is_not_a_failure_and_stays_supported() -> None:
+    """Upstream announcing no date is a fact; failing to ask is not. Only one blocks."""
+    verdict = evaluate(
+        evaluation(
+            gate(">=3.10"),
+            release_facts=facts(
+                declared_about_released_at=moment(2020),
+                declared_about_eol=EolUnpublished(),
+            ),
         )
     )
     assert isinstance(verdict, Supported)
-    assert verdict.limitations == (Limitation("curated_pack_missing"),)
+    assert codes(verdict) == ()
 
 
-def test_unverified_curated_entry_is_reported() -> None:
+def test_an_unreadable_lifecycle_with_corroboration_is_still_supported() -> None:
+    """Direct positive evidence about this exact release does not need the floor check."""
     verdict = evaluate(
         evaluation(
-            gate(),
-            curated=CuratedCoverage(entry_present=True, verified_for_version=False),
+            gate(">=3.10"),
+            statement("supports", "==3.13"),
+            release_facts=facts(
+                declared_about_released_at=moment(2020),
+                declared_about_eol=EolUnavailable(detail="transport_error"),
+            ),
         )
     )
-    assert codes(verdict) == ("curated_not_verified_for_version",)
+    assert isinstance(verdict, Supported)
+
+
+def test_a_closed_ceiling_outranks_an_unreadable_lifecycle() -> None:
+    """An enumerated range is the author's own statement; no floor check applies."""
+    verdict = evaluate(
+        evaluation(
+            gate(">=3.10,<3.14"),
+            release_facts=facts(
+                declared_about_released_at=moment(2020),
+                declared_about_eol=EolUnavailable(detail="timeout"),
+            ),
+        )
+    )
+    assert isinstance(verdict, Supported)
+
+
+def test_a_violated_gate_outranks_an_unreadable_lifecycle() -> None:
+    """A gate violation is mechanical, and does not depend on the support schedule."""
+    verdict = evaluate(
+        evaluation(
+            gate("<3.10"),
+            release_facts=facts(
+                declared_about_eol=EolUnavailable(detail="timeout"),
+            ),
+        )
+    )
+    assert isinstance(verdict, Unsupported)
 
 
 def test_limitations_are_ordered_by_the_declared_code_order() -> None:
@@ -628,12 +692,10 @@ def test_limitations_are_ordered_by_the_declared_code_order() -> None:
         evaluation(
             gate(">=3.10", condition=marker("environment_dependent")),
             corroboration("3.13"),
-            curated=CuratedCoverage(entry_present=False, verified_for_version=False),
-            lookups=(check("curated_pack", "failed", required=False),),
+            lookups=(check("python_release_cycle", "failed", required=False),),
         )
     )
     assert codes(verdict) == (
-        "curated_pack_missing",
         "marker_guarded_claim",
         "source_unavailable",
     )
@@ -796,7 +858,15 @@ _CLAIM_SETS: tuple[tuple[str, ...], ...] = (
 _FACT_SETS: tuple[ReleaseFacts, ...] = (
     facts(),
     facts(declared_about_released_at=moment(2026)),
-    facts(declared_about_released_at=moment(2020), declared_about_eol_at=moment(2024)),
+    facts(
+        declared_about_released_at=moment(2020),
+        declared_about_eol=EolPublished(at=moment(2024)),
+    ),
+    facts(
+        declared_about_released_at=moment(2020),
+        declared_about_eol=EolUnavailable(detail="timeout"),
+    ),
+    facts(declared_about_released_at=moment(2020), declared_about_eol=EolUnpublished()),
     facts(declaring_released_at=None, declared_about_released_at=None),
     facts(
         declaring_yanked=YankedInfo(reason=None),
@@ -807,14 +877,8 @@ _FACT_SETS: tuple[ReleaseFacts, ...] = (
 _LOOKUP_SETS: tuple[tuple[SourceCheck, ...], ...] = (
     OK_LOOKUPS,
     (check("pypi_json", "failed"),),
-    (check("curated_pack", "failed", required=False),),
-    (check("curated_pack", "skipped"),),
-)
-
-_CURATED_SETS: tuple[CuratedCoverage, ...] = (
-    FULLY_CURATED,
-    CuratedCoverage(entry_present=True, verified_for_version=False),
-    CuratedCoverage(entry_present=False, verified_for_version=False),
+    (check("python_release_cycle", "failed", required=False),),
+    (check("python_release_cycle", "skipped"),),
 )
 
 _RELATIONS: tuple[tuple[ResolvedRelation, Target], ...] = (
@@ -889,8 +953,8 @@ def _claim(kind: str, about: Target) -> Claim:
 
 def _generated_inputs() -> list[EvaluationInput]:
     generated: list[EvaluationInput] = []
-    for kinds, release_facts, lookups, curated, (relation, about), found in product(
-        _CLAIM_SETS, _FACT_SETS, _LOOKUP_SETS, _CURATED_SETS, _RELATIONS, (True, False)
+    for kinds, release_facts, lookups, (relation, about), found in product(
+        _CLAIM_SETS, _FACT_SETS, _LOOKUP_SETS, _RELATIONS, (True, False)
     ):
         generated.append(
             EvaluationInput(
@@ -898,7 +962,6 @@ def _generated_inputs() -> list[EvaluationInput]:
                 claims=tuple(_claim(kind, about) for kind in kinds),
                 facts=release_facts,
                 lookups=lookups,
-                curated=curated,
                 declaring_release_found=True,
                 declared_about_release_found=found,
             )
@@ -911,12 +974,7 @@ GENERATED = _generated_inputs()
 
 def test_the_generator_covers_a_meaningful_corpus() -> None:
     expected = (
-        len(_CLAIM_SETS)
-        * len(_FACT_SETS)
-        * len(_LOOKUP_SETS)
-        * len(_CURATED_SETS)
-        * len(_RELATIONS)
-        * 2
+        len(_CLAIM_SETS) * len(_FACT_SETS) * len(_LOOKUP_SETS) * len(_RELATIONS) * 2
     )
     assert len(GENERATED) == expected
 
@@ -1014,3 +1072,25 @@ def test_every_produced_cause_kind_is_reachable_from_the_corpus() -> None:
         for cause in getattr(evaluate(evaluation_input), "causes", ())
     }
     assert produced == set(CAUSE_KINDS), set(CAUSE_KINDS) - produced
+
+
+def test_an_unreadable_lifecycle_is_not_a_cause_when_the_rule_could_not_fire() -> None:
+    """A failure only counts as a cause where it could have changed the answer.
+
+    With no publication date for the declaring release there is nothing to compare an
+    end-of-life instant against, so the floor rule is inert whatever the schedule said. The
+    failure is still disclosed - as coverage, not as the reason the verdict stayed open.
+    """
+    verdict = evaluate(
+        evaluation(
+            gate(">=3.10"),
+            release_facts=facts(
+                declaring_released_at=None,
+                declared_about_released_at=None,
+                declared_about_eol=EolUnavailable(detail="timeout"),
+            ),
+            lookups=(check("python_release_cycle", "failed", required=False),),
+        )
+    )
+    assert isinstance(verdict, Supported)
+    assert codes(verdict) == ("source_unavailable",)

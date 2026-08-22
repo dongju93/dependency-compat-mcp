@@ -24,8 +24,7 @@ PACKAGE = "dependency_compat_mcp"
 # `domain` because its whole job is to project domain values onto the public schema.
 ALLOWED: dict[str, frozenset[str]] = {
     "domain": frozenset({"domain"}),
-    "adapters": frozenset({"domain", "infra", "adapters", "curated"}),
-    "curated": frozenset({"domain", "curated"}),
+    "adapters": frozenset({"domain", "infra", "adapters"}),
     # `infra` may reach inward for the shared failure vocabulary (`InvariantViolation`);
     # what matters is that nothing reaches outward *from* `domain`.
     "infra": frozenset({"infra", "domain"}),
@@ -37,7 +36,7 @@ ALLOWED: dict[str, frozenset[str]] = {
 FORBIDDEN_EXTERNAL: dict[str, frozenset[str]] = {
     "domain": frozenset({"mcp", "httpx2", "httpx", "starlette", "anyio", "pydantic"}),
     "infra": frozenset({"mcp"}),
-    "curated": frozenset({"mcp", "httpx2", "httpx"}),
+    "adapters": frozenset({"mcp", "starlette"}),
 }
 
 
