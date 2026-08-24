@@ -190,9 +190,17 @@ class RuntimeReleaseAbsent:
 
     This is the only value that may become ``release_not_found``: it rests on a source
     that was actually read.
+
+    ``line_exists`` carries the other fact the same document already settled: whether the
+    index lists any release at all in this target's release line. It is the difference
+    between a mistyped patch component (``3.13.99`` - the 3.13 line is real) and a version
+    that was never going to exist (``3.99.0``). Reported rather than acted on: both remain
+    ``release_not_found``, because both rest on the same read and neither makes the exact
+    release exist.
     """
 
     target: Target
+    line_exists: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +404,35 @@ def _line_key(target: Target) -> str:
 # --------------------------------------------------------------------------------------
 
 
+def _index_line_prefix(target: Target) -> str:
+    """The exact-version prefix every release in ``target``'s line shares.
+
+    Spelled the way the *index* spells versions rather than the way the schedule does:
+    :func:`_line_key` answers a schedule keyed ``v22``, while both indexes key by the
+    canonical exact version. Keeping the two spellings in separate functions is what stops
+    one document's key grammar from leaking into the other.
+
+    Prefixes rather than parsed tuples because the index keys are already canonical, and a
+    trailing dot makes the match exact: ``"3.10.0"`` does not start with ``"3.1."``.
+    """
+    release = release_tuple(version_of(target))
+    match runtime_of(target):
+        case "python":
+            return f"{release[0]}.{release[1]}."
+        case "node":
+            # The same 0.x split `_line_key` makes: those lines shipped and retired
+            # independently, so 0.10 and 0.12 are two lines, not one.
+            return f"0.{release[1]}." if release[0] == 0 else f"{release[0]}."
+        case never:
+            assert_never(never)
+
+
+def _line_is_listed(released_at: Mapping[str, datetime], target: Target) -> bool:
+    """Whether the fetched index lists any release in ``target``'s line."""
+    prefix = _index_line_prefix(target)
+    return any(version.startswith(prefix) for version in released_at)
+
+
 def select_release(lookup: RuntimeIndexLookup, target: Target) -> RuntimeReleaseLookup:
     """Read one release out of a fetched index. Pure and total."""
     match lookup:
@@ -405,7 +442,9 @@ def select_release(lookup: RuntimeIndexLookup, target: Target) -> RuntimeRelease
             version = version_of(target)
             found = released_at.get(str(version))
             if found is None:
-                return RuntimeReleaseAbsent(target=target)
+                return RuntimeReleaseAbsent(
+                    target=target, line_exists=_line_is_listed(released_at, target)
+                )
             return RuntimeReleaseFound(version=version, released_at=found)
         case _:
             assert_never(lookup)
@@ -520,12 +559,15 @@ def index_check(
     match lookup:
         case RuntimeReleaseFound():
             return SourceCheck(source=source, target=target, role=role, outcome="ok")
-        case RuntimeReleaseAbsent():
+        case RuntimeReleaseAbsent(line_exists=line_exists):
+            # `detail` reports what the index said, never what the caller should have
+            # typed: the row stays a statement about the document that was read.
             return SourceCheck(
                 source=source,
                 target=target,
                 role=role,
                 outcome="not_found",
+                detail="line_exists" if line_exists else "line_absent",
             )
         case RuntimeReleaseUnavailable(detail=detail):
             return SourceCheck(
