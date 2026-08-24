@@ -493,11 +493,15 @@ def test_eol_after_the_declaring_release_does_not_fire() -> None:
     assert isinstance(verdict, Supported)
 
 
-def test_unknown_release_dates_do_not_fire_the_temporal_branches() -> None:
+def test_unknown_release_dates_leave_an_open_ceiling_unknown() -> None:
     verdict = evaluate(
         evaluation(gate(">=3.10"), release_facts=facts(declaring_released_at=None))
     )
-    assert isinstance(verdict, Supported)
+    assert isinstance(verdict, Unknown)
+    assert verdict.reason == "insufficient_evidence"
+    assert verdict.causes == (
+        UnprovenClaim(kind="open_upper_bound", evidence_ids=("ev-gate",)),
+    )
     assert codes(verdict) == ()
 
 
@@ -1074,13 +1078,8 @@ def test_every_produced_cause_kind_is_reachable_from_the_corpus() -> None:
     assert produced == set(CAUSE_KINDS), set(CAUSE_KINDS) - produced
 
 
-def test_an_unreadable_lifecycle_is_not_a_cause_when_the_rule_could_not_fire() -> None:
-    """A failure only counts as a cause where it could have changed the answer.
-
-    With no publication date for the declaring release there is nothing to compare an
-    end-of-life instant against, so the floor rule is inert whatever the schedule said. The
-    failure is still disclosed - as coverage, not as the reason the verdict stayed open.
-    """
+def test_missing_release_dates_outrank_an_unreadable_lifecycle() -> None:
+    """The open ceiling is already unproven when publication order is unavailable."""
     verdict = evaluate(
         evaluation(
             gate(">=3.10"),
@@ -1092,5 +1091,9 @@ def test_an_unreadable_lifecycle_is_not_a_cause_when_the_rule_could_not_fire() -
             lookups=(check("python_release_cycle", "failed", required=False),),
         )
     )
-    assert isinstance(verdict, Supported)
+    assert isinstance(verdict, Unknown)
+    assert verdict.reason == "insufficient_evidence"
+    assert verdict.causes == (
+        UnprovenClaim(kind="open_upper_bound", evidence_ids=("ev-gate",)),
+    )
     assert codes(verdict) == ("source_unavailable",)

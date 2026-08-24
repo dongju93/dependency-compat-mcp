@@ -168,16 +168,15 @@ def pypi_release(
     }
 
 
-def npm_packument(
+def npm_manifest(
     name: str,
     version: str,
     *,
     engines: dict[str, str] | None = None,
     dependencies: dict[str, str] | None = None,
     peer_dependencies: dict[str, str] | None = None,
-    released: str = "2025-06-01T00:00:00.000Z",
 ) -> dict[str, Any]:
-    """The shape of ``https://registry.npmjs.org/{name}`` we actually read."""
+    """The shape of ``https://registry.npmjs.org/{name}/{version}`` we read."""
     entry: dict[str, Any] = {"name": name, "version": version}
     if engines is not None:
         entry["engines"] = engines
@@ -185,19 +184,16 @@ def npm_packument(
         entry["dependencies"] = dependencies
     if peer_dependencies is not None:
         entry["peerDependencies"] = peer_dependencies
-    return {
-        "name": name,
-        "versions": {version: entry},
-        "time": {version: released},
-    }
+    return entry
 
 
 def pypi_url(name: str, version: str) -> str:
     return f"https://pypi.org/pypi/{name}/{version}/json"
 
 
-def npm_url(name: str) -> str:
-    return f"https://registry.npmjs.org/{name.replace('@', '@').replace('/', '%2F')}"
+def npm_url(name: str, version: str) -> str:
+    encoded_name = name.replace("/", "%2F")
+    return f"https://registry.npmjs.org/{encoded_name}/{version}"
 
 
 def build_service(

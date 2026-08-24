@@ -153,6 +153,10 @@ async def test_input_schema_matches_02(
         assert target["properties"]["namespace"]["maxLength"] == 32
         assert target["properties"]["name"]["maxLength"] == 200
         assert target["properties"]["version"]["maxLength"] == 100
+        assert (
+            "python 3.13.7 or node 22.11.0"
+            in target["properties"]["version"]["description"]
+        )
         for field in ("namespace", "name", "version"):
             assert target["properties"][field]["minLength"] == 1
 

@@ -22,7 +22,7 @@ from dependency_compat_mcp.service import CompatibilityService
 from tests.conftest import (
     FakeFetcher,
     build_service,
-    npm_packument,
+    npm_manifest,
     npm_url,
     pypi_release,
     pypi_url,
@@ -364,7 +364,7 @@ def test_a_yanked_release_still_gets_a_verdict_plus_a_notice() -> None:
     assert "subject_yanked" in _codes(result, "notices")
 
 
-def test_engines_node_is_a_statement_rather_than_an_installation_gate() -> None:
+def test_a_large_npm_package_uses_its_exact_version_manifest() -> None:
     """npm only warns on an engines mismatch unless `engine-strict` is set.
 
     The server is not told the caller's npm configuration, so it does not predict an
@@ -372,7 +372,9 @@ def test_engines_node_is_a_statement_rather_than_an_installation_gate() -> None:
     """
     fetcher = FakeFetcher(
         payloads={
-            npm_url("react"): npm_packument("react", "19.1.1", engines={"node": ">=18"})
+            npm_url("react", "19.1.1"): npm_manifest(
+                "react", "19.1.1", engines={"node": ">=18"}
+            )
         }
     )
     result = _check(
@@ -387,6 +389,28 @@ def test_engines_node_is_a_statement_rather_than_an_installation_gate() -> None:
     )
     assert statement["scheme"] == "semver"
     assert statement["expression"] == ">=18"
+    assert "https://registry.npmjs.org/react/19.1.1" in fetcher.calls
+    assert "https://registry.npmjs.org/react" not in fetcher.calls
+
+
+def test_an_open_npm_dependency_without_release_times_stays_unknown() -> None:
+    fetcher = FakeFetcher(
+        payloads={
+            npm_url("app", "1.0.0"): npm_manifest(
+                "app", "1.0.0", dependencies={"library": ">=2.0.0"}
+            ),
+            npm_url("library", "2.1.0"): npm_manifest("library", "2.1.0"),
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("npm", "app", "1.0.0"),
+        ("npm", "library", "2.1.0"),
+    )
+
+    assert result["verdict"] == "unknown"
+    assert result["reason"] == "insufficient_evidence"
+    assert _kinds(result) == ["open_upper_bound"]
 
 
 # --------------------------------------------------------------------------------------
@@ -814,6 +838,26 @@ def test_a_version_absent_from_the_official_index_is_release_not_found() -> None
     assert _outcome(result, "python_release_index") == "not_found"
 
 
+def test_a_minor_only_python_version_reports_that_a_patch_is_required() -> None:
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "django", "5.2", requires_python=">=3.10,<3.14"
+            )
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("pypi", "django", "5.2"),
+        ("runtime", "python", "3.13"),
+    )
+
+    assert result["reason"] == "release_not_found"
+    row = _row(result, "python_release_index")
+    assert row["outcome"] == "not_found"
+    assert row["detail"] == "line_exists_patch_required"
+
+
 def test_an_unreadable_release_index_is_lookup_failed_not_release_not_found() -> None:
     """ "We could not look" must never be served as "it does not exist"."""
     fetcher = FakeFetcher(
@@ -891,7 +935,9 @@ def test_the_two_runtime_documents_are_reported_as_separate_rows() -> None:
     """One row each: merged, the caller could not tell which document failed."""
     fetcher = FakeFetcher(
         payloads={
-            npm_url("react"): npm_packument("react", "19.1.1", engines={"node": ">=18"})
+            npm_url("react", "19.1.1"): npm_manifest(
+                "react", "19.1.1", engines={"node": ">=18"}
+            )
         }
     )
     result = _check(
@@ -940,7 +986,9 @@ def test_a_failed_official_document_is_not_cached() -> None:
 
     fetcher = FlakyFetcher(
         payloads={
-            npm_url("react"): npm_packument("react", "19.1.1", engines={"node": ">=18"})
+            npm_url("react", "19.1.1"): npm_manifest(
+                "react", "19.1.1", engines={"node": ">=18"}
+            )
         }
     )
     service = build_service(fetcher)
