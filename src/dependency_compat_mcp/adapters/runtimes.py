@@ -522,7 +522,10 @@ def index_check(
             return SourceCheck(source=source, target=target, role=role, outcome="ok")
         case RuntimeReleaseAbsent():
             return SourceCheck(
-                source=source, target=target, role=role, outcome="not_found"
+                source=source,
+                target=target,
+                role=role,
+                outcome="not_found",
             )
         case RuntimeReleaseUnavailable(detail=detail):
             return SourceCheck(

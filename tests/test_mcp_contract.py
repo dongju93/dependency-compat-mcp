@@ -153,6 +153,10 @@ async def test_input_schema_matches_02(
         assert target["properties"]["namespace"]["maxLength"] == 32
         assert target["properties"]["name"]["maxLength"] == 200
         assert target["properties"]["version"]["maxLength"] == 100
+        assert (
+            "python 3.13.7 or node 22.11.0"
+            in target["properties"]["version"]["description"]
+        )
         for field in ("namespace", "name", "version"):
             assert target["properties"][field]["minLength"] == 1
 
@@ -487,6 +491,18 @@ async def test_every_diagnostic_array_is_present_even_when_empty(
             },
             "a version range",
             id="version-range",
+        ),
+        pytest.param(
+            {
+                "subject": {"namespace": "pypi", "name": "django", "version": "5.2"},
+                "counterpart": {
+                    "namespace": "runtime",
+                    "name": "python",
+                    "version": "3.13",
+                },
+            },
+            "a Python runtime version without a patch component",
+            id="python-runtime-without-patch",
         ),
         pytest.param(
             {

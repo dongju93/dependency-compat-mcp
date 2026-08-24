@@ -61,7 +61,8 @@ class TargetInput(BaseModel):
             max_length=MAX_VERSION_LENGTH,
             description=(
                 "One exact release. Ranges, wildcards and unions such as '>=3.10,<3.14', "
-                "'^19' or '1.x' are rejected."
+                "'^19' or '1.x' are rejected. Runtime targets require a complete release "
+                "including the patch component, for example python 3.13.7 or node 22.11.0."
             ),
         ),
     ]

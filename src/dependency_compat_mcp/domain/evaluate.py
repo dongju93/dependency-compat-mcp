@@ -545,15 +545,22 @@ def _unknown(
 # --------------------------------------------------------------------------------------
 
 
-def _declared_about_is_newer(facts: ReleaseFacts) -> bool:
-    """Did the counterpart appear only after the declaring release was published?
+type _ReleaseOrder = Literal["not_newer", "newer", "unavailable"]
 
-    ``None`` on either side means the question cannot be asked, and an unanswerable
-    question must not fire a branch - so the check is written to fail closed.
+
+def _declared_about_release_order(facts: ReleaseFacts) -> _ReleaseOrder:
+    """Order the two publication instants without folding missing data into a fact.
+
+    A missing instant is ``unavailable``, not ``not_newer``. An open-ended gate written at
+    an unknown time cannot prove that a counterpart was already in scope, so treating the
+    absent timestamp as a false comparison would let incomplete source metadata become a
+    confident ``supported`` verdict.
     """
     if facts.declaring_released_at is None or facts.declared_about_released_at is None:
-        return False
-    return facts.declared_about_released_at > facts.declaring_released_at
+        return "unavailable"
+    if facts.declared_about_released_at > facts.declaring_released_at:
+        return "newer"
+    return "not_newer"
 
 
 type _FloorCheck = Literal["not_stale", "stale", "uncheckable"]
@@ -601,20 +608,25 @@ def _step_five(
         # An enumerated range *is* the statement: the author named where support stops.
         return _supported(gates, notices, limitations)
 
-    if _declared_about_is_newer(facts):
-        if corroborating:
-            return _supported(gates + corroborating, notices, limitations)
-        return _unknown(
-            "insufficient_evidence",
-            notices,
-            limitations,
-            # The satisfied gates *are* the open-ended ranges, so they are the evidence a
-            # caller has to read to see why nothing here amounts to a support statement.
-            [
-                UnprovenClaim(kind="open_upper_bound", evidence_ids=gates),
-                *buckets.causes,
-            ],
-        )
+    match _declared_about_release_order(facts):
+        case "newer" | "unavailable":
+            if corroborating:
+                return _supported(gates + corroborating, notices, limitations)
+            return _unknown(
+                "insufficient_evidence",
+                notices,
+                limitations,
+                # The satisfied gates *are* the open-ended ranges, so they are the evidence
+                # a caller has to read to see why nothing here amounts to a support statement.
+                [
+                    UnprovenClaim(kind="open_upper_bound", evidence_ids=gates),
+                    *buckets.causes,
+                ],
+            )
+        case "not_newer":
+            pass
+        case never:
+            assert_never(never)
 
     match _lower_bound_check(facts):
         case "stale":

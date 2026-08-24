@@ -22,7 +22,7 @@ from dependency_compat_mcp.domain.targets import parse_target
 from tests.conftest import (
     FakeFetcher,
     build_service,
-    npm_packument,
+    npm_manifest,
     npm_url,
     pypi_release,
     pypi_url,
@@ -55,7 +55,7 @@ PAYLOADS: dict[str, Any] = {
         ],
     ),
     pypi_url("helper", "1.5"): pypi_release("helper", "1.5"),
-    npm_url("react"): npm_packument(
+    npm_url("react", "19.1.1"): npm_manifest(
         "react",
         "19.1.1",
         engines={"node": ">=18"},

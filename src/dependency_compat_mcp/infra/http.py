@@ -71,7 +71,7 @@ Adding a host widens what this server will treat as fact and requires human revi
 """
 
 MAX_RESPONSE_BYTES: Final = 5 * 1024 * 1024
-"""Body ceiling. A large npm packument must not decide this server's memory use."""
+"""Body ceiling. No upstream response may decide this server's memory use."""
 
 DEFAULT_ATTEMPT_TIMEOUT: Final = 5.0
 """Seconds for one HTTP attempt, including reading its body."""

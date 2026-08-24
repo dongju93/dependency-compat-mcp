@@ -48,7 +48,7 @@ from dependency_compat_mcp.domain.summaries import (
 from dependency_compat_mcp.domain.targets import Target, TargetId, parse_target
 
 FRAMEWORK = parse_target("pypi", "example-framework", "5.2")
-PYTHON = parse_target("runtime", "python", "3.13")
+PYTHON = parse_target("runtime", "python", "3.13.0")
 PYTHON_ID = TargetId.of(PYTHON)
 
 
@@ -122,7 +122,7 @@ def test_templates_are_unique() -> None:
 
 def test_render_target_shows_the_evaluated_identity() -> None:
     assert render_target(FRAMEWORK) == "pypi:example-framework 5.2"
-    assert render_target(PYTHON) == "runtime:python 3.13"
+    assert render_target(PYTHON) == "runtime:python 3.13.0"
 
 
 # --------------------------------------------------------------------------------------
@@ -136,7 +136,7 @@ def test_supported_summary_names_both_sides_and_the_rule() -> None:
         PYTHON_RELATION,
     )
     assert summary == (
-        "runtime:python 3.13 satisfies pypi:example-framework 5.2's requires_python, "
+        "runtime:python 3.13.0 satisfies pypi:example-framework 5.2's requires_python, "
         "backed by 1 source(s)."
     )
 
@@ -230,7 +230,7 @@ def test_an_environment_marker_cause_quotes_the_marker() -> None:
         PYTHON_RELATION,
     )
     assert summary == (
-        "pypi:example-framework 5.2's requirement for runtime:python 3.13 is conditional "
+        "pypi:example-framework 5.2's requirement for runtime:python 3.13.0 is conditional "
         'on sys_platform == "win32"; the request carries no environment, so '
         "compatibility is unknown."
     )
@@ -257,7 +257,7 @@ def test_the_summary_narrates_the_first_cause_and_counts_the_rest() -> None:
         "environment_marker", 'sys_platform == "win32"', "sys_platform"
     )
     assert summary.startswith(
-        "pypi:example-framework 5.2's requirement for runtime:python 3.13 is conditional"
+        "pypi:example-framework 5.2's requirement for runtime:python 3.13.0 is conditional"
     )
     assert summary.endswith(" 1 further cause(s) are listed in decision_causes.")
 
@@ -275,8 +275,8 @@ def test_an_unresolved_relation_gets_the_relation_not_supported_summary() -> Non
         Unknown(reason="relation_not_supported", notices=(), limitations=()), unresolved
     )
     assert summary == (
-        "No relation rule is registered for runtime:python 3.13 and "
-        "runtime:python 3.13 in an allowed direction."
+        "No relation rule is registered for runtime:python 3.13.0 and "
+        "runtime:python 3.13.0 in an allowed direction."
     )
 
 
@@ -348,7 +348,7 @@ def _skeleton(summary: str) -> str:
     """Strip the values a template interpolates, leaving the sentence's fixed skeleton."""
     for value in (
         "pypi:example-framework 5.2",
-        "runtime:python 3.13",
+        "runtime:python 3.13.0",
         "pypi:example-library 2.0",
         "requires_python",
         "requires_dist",
@@ -363,9 +363,9 @@ def _template_skeletons() -> set[str]:
         _skeleton(
             template.format(
                 declaring="pypi:example-framework 5.2",
-                declared_about="runtime:python 3.13",
-                subject="runtime:python 3.13",
-                counterpart="runtime:python 3.13",
+                declared_about="runtime:python 3.13.0",
+                subject="runtime:python 3.13.0",
+                counterpart="runtime:python 3.13.0",
                 target="pypi:example-framework 5.2",
                 rule="requires_python",
                 evidence_count=0,

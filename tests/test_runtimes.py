@@ -193,6 +193,7 @@ def test_a_version_missing_from_a_readable_index_is_absent_not_failed() -> None:
     assert found == RuntimeReleaseAbsent(target=target)
     check = index_check(target, found, role="declared_about")
     assert (check.outcome, check.required) == ("not_found", True)
+    assert check.detail is None
 
 
 # --------------------------------------------------------------------------------------
