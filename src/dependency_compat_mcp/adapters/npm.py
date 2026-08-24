@@ -151,7 +151,7 @@ def parse_manifest(
     if manifest_name != target.name or manifest_version != target.version:
         # Defence in depth: a successful endpoint response must never substitute a nearby
         # or differently named release for the exact target the caller requested.
-        return ReleaseNotFound(target=target)
+        return LookupFailed(target=target, detail="invalid_document")
 
     claims: list[Claim] = []
     evidence: list[Evidence] = []

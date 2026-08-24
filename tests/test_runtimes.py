@@ -196,24 +196,6 @@ def test_a_version_missing_from_a_readable_index_is_absent_not_failed() -> None:
     assert check.detail is None
 
 
-def test_a_minor_only_python_version_explains_that_a_patch_is_required() -> None:
-    target = _python("3.13")
-    payloads = {
-        PYTHON_RELEASE_INDEX_URL: python_release_index(
-            {"3.13.0": "2024-10-07", "3.13.7": "2025-08-14"}
-        )
-    }
-
-    found = select_release(_index(target, payloads), target)
-
-    assert found == RuntimeReleaseAbsent(
-        target=target, detail="line_exists_patch_required"
-    )
-    check = index_check(target, found, role="declared_about")
-    assert check.outcome == "not_found"
-    assert check.detail == "line_exists_patch_required"
-
-
 # --------------------------------------------------------------------------------------
 # Parsing rules the generator used to enforce, now enforced per request
 # --------------------------------------------------------------------------------------

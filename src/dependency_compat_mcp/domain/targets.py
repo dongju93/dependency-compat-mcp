@@ -390,6 +390,19 @@ def parse_pep440_version(raw: str) -> Pep440Version:
     return Pep440Version(raw=raw, parsed=parsed)
 
 
+def _parse_python_runtime_version(raw: str) -> Pep440Version:
+    """Parse a concrete CPython release, including its patch component."""
+    version = parse_pep440_version(raw)
+    if len(version.parsed.release) < 3:
+        raise InputError(
+            "runtime_patch_required",
+            "Python runtime version must include major, minor, and patch components "
+            "(for example, '3.13.7').",
+            field="version",
+        )
+    return version
+
+
 def parse_semver_version(raw: str) -> SemverVersion:
     """Parse an exact npm SemVer release, rejecting ranges and non-canonical spellings."""
     _reject_untrimmed("version", raw, maximum=MAX_VERSION_LENGTH)
@@ -442,7 +455,9 @@ def parse_target(namespace: str, name: str, version: str) -> Target:
         case "runtime":
             match parse_runtime_name(name):
                 case "python":
-                    return PythonRuntimeTarget(version=parse_pep440_version(version))
+                    return PythonRuntimeTarget(
+                        version=_parse_python_runtime_version(version)
+                    )
                 case "node":
                     return NodeRuntimeTarget(version=parse_semver_version(version))
                 case never:

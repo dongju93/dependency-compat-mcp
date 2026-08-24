@@ -45,7 +45,7 @@ Two rules the parsers never bend, inherited from the generator this module repla
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Final, Literal, assert_never
+from typing import Final, assert_never
 
 from dependency_compat_mcp.domain.claims import (
     EolNotApplicable,
@@ -193,7 +193,6 @@ class RuntimeReleaseAbsent:
     """
 
     target: Target
-    detail: Literal["line_exists_patch_required"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,28 +405,10 @@ def select_release(lookup: RuntimeIndexLookup, target: Target) -> RuntimeRelease
             version = version_of(target)
             found = released_at.get(str(version))
             if found is None:
-                return RuntimeReleaseAbsent(
-                    target=target,
-                    detail=_release_absence_detail(target, released_at),
-                )
+                return RuntimeReleaseAbsent(target=target)
             return RuntimeReleaseFound(version=version, released_at=found)
         case _:
             assert_never(lookup)
-
-
-def _release_absence_detail(
-    target: Target, released_at: Mapping[str, datetime]
-) -> Literal["line_exists_patch_required"] | None:
-    """Explain a minor-only Python miss when the read index proves the line exists."""
-    if not isinstance(target, PythonRuntimeTarget):
-        return None
-    release = release_tuple(target.version)
-    if len(release) != 2:
-        return None
-    prefix = f"{release[0]}.{release[1]}."
-    if any(version.startswith(prefix) for version in released_at):
-        return "line_exists_patch_required"
-    return None
 
 
 def select_eol(lookup: RuntimeLifecycleLookup | None, target: Target) -> EolStatus:
@@ -539,13 +520,12 @@ def index_check(
     match lookup:
         case RuntimeReleaseFound():
             return SourceCheck(source=source, target=target, role=role, outcome="ok")
-        case RuntimeReleaseAbsent(detail=detail):
+        case RuntimeReleaseAbsent():
             return SourceCheck(
                 source=source,
                 target=target,
                 role=role,
                 outcome="not_found",
-                detail=detail,
             )
         case RuntimeReleaseUnavailable(detail=detail):
             return SourceCheck(

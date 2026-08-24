@@ -838,26 +838,6 @@ def test_a_version_absent_from_the_official_index_is_release_not_found() -> None
     assert _outcome(result, "python_release_index") == "not_found"
 
 
-def test_a_minor_only_python_version_reports_that_a_patch_is_required() -> None:
-    fetcher = FakeFetcher(
-        payloads={
-            pypi_url("django", "5.2"): pypi_release(
-                "django", "5.2", requires_python=">=3.10,<3.14"
-            )
-        }
-    )
-    result = _check(
-        build_service(fetcher),
-        ("pypi", "django", "5.2"),
-        ("runtime", "python", "3.13"),
-    )
-
-    assert result["reason"] == "release_not_found"
-    row = _row(result, "python_release_index")
-    assert row["outcome"] == "not_found"
-    assert row["detail"] == "line_exists_patch_required"
-
-
 def test_an_unreadable_release_index_is_lookup_failed_not_release_not_found() -> None:
     """ "We could not look" must never be served as "it does not exist"."""
     fetcher = FakeFetcher(

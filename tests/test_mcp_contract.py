@@ -494,6 +494,18 @@ async def test_every_diagnostic_array_is_present_even_when_empty(
         ),
         pytest.param(
             {
+                "subject": {"namespace": "pypi", "name": "django", "version": "5.2"},
+                "counterpart": {
+                    "namespace": "runtime",
+                    "name": "python",
+                    "version": "3.13",
+                },
+            },
+            "a Python runtime version without a patch component",
+            id="python-runtime-without-patch",
+        ),
+        pytest.param(
+            {
                 "subject": {"namespace": "npm", "name": "react", "version": "v19.1.1"},
                 "counterpart": {
                     "namespace": "runtime",

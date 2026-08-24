@@ -164,10 +164,12 @@ def test_an_unpublished_version_404_is_absence() -> None:
     )
 
 
-def test_a_different_manifest_is_never_substituted_for_the_target() -> None:
+def test_a_different_manifest_is_an_invalid_document() -> None:
     payload = load("npm_sample_package.json")["versions"]["4.19.2"]
     target = npm_target(version="5.0.0")
-    assert fetch(ok(payload), target) == ReleaseNotFound(target=target)
+    assert fetch(ok(payload), target) == LookupFailed(
+        target=target, detail="invalid_document"
+    )
 
 
 # --------------------------------------------------------------------------------------

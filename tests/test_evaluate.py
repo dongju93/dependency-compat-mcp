@@ -63,7 +63,7 @@ from dependency_compat_mcp.domain.versions import bounded_above
 
 FRAMEWORK = parse_target("pypi", "example-framework", "5.2")
 LIBRARY = parse_target("pypi", "example-library", "2.0")
-PYTHON = parse_target("runtime", "python", "3.13")
+PYTHON = parse_target("runtime", "python", "3.13.0")
 
 
 def check(
