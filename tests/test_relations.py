@@ -55,7 +55,7 @@ CELERY: Final = _pypi("celery", "5.5.0")
 REACT: Final = _npm("react", "19.1.1")
 REACT_DOM: Final = _npm("react-dom", "19.1.1")
 PYTHON: Final = PythonRuntimeTarget(
-    version=Pep440Version(raw="3.13", parsed=Version("3.13"))
+    version=Pep440Version(raw="3.13.0", parsed=Version("3.13.0"))
 )
 NODE: Final = NodeRuntimeTarget(version=_semver("22.17.0"))
 

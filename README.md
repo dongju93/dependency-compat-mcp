@@ -2,7 +2,7 @@
 
 사용자가 지정한 두 패키지 또는 패키지와 런타임의 버전 조합이 공식 배포 정보에 명시된 요구 버전 범위를 만족하는지 확인해 답하는 Model Context Protocol(MCP) 서버입니다.
 
-서버는 정확한 두 릴리스, 즉 배포된 두 버전(예: `pypi:django@5.2`와 `runtime:python@3.13`)을 비교합니다. 서버는 비교 결과를 `supported` / `unsupported` / `unknown` 중 하나로 표시하고, **판단에 사용한 근거도 함께** 돌려줍니다. 서버는 요청을 처리하는 동안 언어 모델을 호출하지 않습니다. 버전 범위 해석과 비교는 Python 패키지용 `packaging`과 npm 패키지용 `node-semver`가 담당합니다.
+서버는 정확한 두 릴리스, 즉 배포된 두 버전(예: `pypi:django@5.2`와 `runtime:python@3.13.7`)을 비교합니다. 서버는 비교 결과를 `supported` / `unsupported` / `unknown` 중 하나로 표시하고, **판단에 사용한 근거도 함께** 돌려줍니다. 서버는 요청을 처리하는 동안 언어 모델을 호출하지 않습니다. 버전 범위 해석과 비교는 Python 패키지용 `packaging`과 npm 패키지용 `node-semver`가 담당합니다.
 
 공개 서버를 Claude Code에 등록하려면 다음 명령을 실행합니다.
 
@@ -34,9 +34,17 @@ claude mcp add --transport http dependency-compat \
 
 ### Claude Code
 
+공개 서버에 연결합니다.
+
 ```bash
 claude mcp add --transport http dependency-compat \
   https://dependency-compat-mcp-git-769945419767.asia-northeast3.run.app/mcp
+```
+
+서버를 직접 실행해서 쓰려면 PyPI에 배포된 패키지를 stdio로 실행합니다. `uvx`가 실행 시점에 패키지를 내려받으므로 저장소를 복제하지 않아도 되고, 서버는 클라이언트와 같은 컴퓨터의 자식 프로세스로 뜹니다.
+
+```bash
+claude mcp add dependency-compat -- uvx dependency-compat-mcp
 ```
 
 ### Codex
@@ -46,16 +54,28 @@ claude mcp add --transport http dependency-compat \
 ### HTTP 서버 직접 호스팅
 
 ```bash
-uv run dependency-compat-mcp --transport http --host 127.0.0.1 --port 8000
+uvx dependency-compat-mcp --transport http --host 127.0.0.1 --port 8000
 ```
 
+저장소를 복제해 실행할 때는 `uv sync` 뒤에 `uv run dependency-compat-mcp --transport http`를 사용합니다.
+
 HTTP 전송은 `POST /mcp` 엔드포인트 하나를 사용합니다. HTTP 서버는 클라이언트별 세션 상태를 저장하지 않으므로, 같은 설정의 서버 인스턴스를 여러 개 실행할 수 있습니다. 서버는 `--host`와 `--port`에 지정한 주소를 기준으로 허용할 HTTP `Host` 및 `Origin` 헤더를 정합니다. 클라이언트와 서버 사이에서 요청을 전달하는 리버스 프록시가 요청 주소를 다른 `Host` 헤더로 보내면 DNS 재바인딩 공격 방어가 해당 요청을 거부합니다. 인터넷에 서버를 공개할 때는 리버스 프록시나 클라우드 서비스에서 HTTPS 암호화(TLS)와 사용자 인증을 구성해야 합니다.
+
+저장소의 `Dockerfile`은 Cloud Run 배포를 위한 이미지입니다. 서버는 Cloud Run이 주입하는 `K_SERVICE`, `K_REVISION`, `K_CONFIGURATION`이 모두 있을 때만 `0.0.0.0`에 바인딩하고, 그렇지 않으면 기본값인 루프백 주소에 바인딩합니다. 그래서 이 이미지를 로컬에서 실행할 때는 바인딩 주소를 직접 지정해야 컨테이너 밖에서 접속할 수 있습니다.
+
+```bash
+docker build -t dependency-compat-mcp .
+docker run --rm -p 8080:8080 dependency-compat-mcp \
+  --transport http --host 0.0.0.0 --port 8080
+```
+
+컨테이너를 인터넷에 공개할 때는 `--public-base-url https://<공개 주소>`(또는 환경 변수 `MCP_PUBLIC_BASE_URL`)로 실제 공개 주소를 알려줘야 `Host`와 `Origin` 검증이 그 주소를 기준으로 동작합니다.
 
 ---
 
 ## 무엇을 물어볼 수 있는가
 
-비교 대상 하나는 `namespace`, `name`, `version`이라는 세 필드로 식별합니다. `namespace`는 대상의 종류를 나타내며 `pypi`, `npm`, `runtime` 중 하나여야 합니다. `name`은 패키지 이름이며, `runtime` 대상에서는 `python` 또는 `node`여야 합니다. `version`에는 버전 범위가 아닌 정확한 버전 하나를 입력해야 합니다. PyPI와 Python 버전은 PEP 440 문법으로, npm과 Node.js 버전은 엄격한 SemVer 문법으로 해석합니다.
+비교 대상 하나는 `namespace`, `name`, `version`이라는 세 필드로 식별합니다. `namespace`는 대상의 종류를 나타내며 `pypi`, `npm`, `runtime` 중 하나여야 합니다. `name`은 패키지 이름이며, `runtime` 대상에서는 `python` 또는 `node`여야 합니다. `version`에는 버전 범위가 아닌 정확한 버전 하나를 입력해야 합니다. `runtime` 대상은 `python 3.13.7`, `node 22.11.0`처럼 패치 구성 요소까지 적어야 합니다. PyPI와 Python 버전은 PEP 440 문법으로, npm과 Node.js 버전은 엄격한 SemVer 문법으로 해석합니다.
 
 판정할 수 있는 관계는 넷입니다. 이 표에 없는 조합은 **외부 조회를 시작하기 전에** 바로 `unknown`으로 끝납니다.
 
@@ -150,7 +170,7 @@ MCP 클라이언트는 `tools/list` 응답에 포함된 JSON 스키마에서 전
 
 **3. 프로젝트 전체의 설치 가능성을 계산하는 의존성 해결 도구(resolver)를 대체하지 않습니다.** 서버는 첫 번째 입력인 `subject`가 두 번째 입력에 대해 선언한 **직접 버전 제약**만 확인합니다. 서버는 하위 의존성을 따라가거나, 버전 범위에서 설치할 버전을 고르거나, 여러 패키지의 버전 충돌을 해결하지 않습니다. **이 서버의 역할은 의존성 해결이 아니라 선언된 조건과 근거를 설명하는 것입니다.**
 
-**4. 근거가 충분하지 않으면 `unknown`이 자주 나옵니다.** 버전 제약에 상한이 없거나, PyPI 분류 항목 같은 간접적인 긍정 신호만 있거나, 특정 운영체제·Python 버전 등에서만 적용되는 환경 조건(marker)이 붙어 있거나, 두 값의 버전 체계가 달라 비교할 수 없으면 `unknown`이 될 수 있습니다. 최신 Python과 임의의 패키지를 비교하는 질문도 공식 지원 근거가 없으면 `unknown`이 될 수 있습니다. `unknown` 응답은 **선언된 설치 조건을 만족한다는 사실과 해당 버전을 공식 지원한다고 확인할 근거가 없다는 사실을 구분해서** 전달합니다.
+**4. 근거가 충분하지 않으면 `unknown`이 자주 나옵니다.** 버전 제약에 상한이 없거나, PyPI 분류 항목 같은 간접적인 긍정 신호만 있거나, 특정 운영체제·Python 버전 등에서만 적용되는 환경 조건(marker)이 붙어 있거나, 두 값의 버전 체계가 달라 비교할 수 없으면 `unknown`이 될 수 있습니다. 최신 Python과 임의의 패키지를 비교하는 질문도 공식 지원 근거가 없으면 `unknown`이 될 수 있습니다. npm은 응답 크기가 작은 exact-version 문서만 조회하며 이 문서에는 출시 시점이 없으므로, 출시 순서에 의존하는 상한 없는 npm 제약은 추가 근거가 없으면 `unknown`입니다. `unknown` 응답은 **선언된 설치 조건을 만족한다는 사실과 해당 버전을 공식 지원한다고 확인할 근거가 없다는 사실을 구분해서** 전달합니다.
 
 **5. 사용자의 코드베이스와 설치 환경을 검사하지 않습니다.** 서버는 저장소 경로나 설치 버전을 고정한 lockfile을 입력받지 않으므로 "사용자의 프로젝트 전체가 호환된다"고 판정할 수 없습니다. 서버는 운영체제나 Python 버전처럼 환경 조건(marker)의 참·거짓을 결정하는 값도 입력받지 않으므로 조건을 임의로 참이라고 가정하지 않습니다. 프로젝트와 실행 환경을 함께 고려한 최종 판단은 이 서버의 응답을 사용하는 MCP 클라이언트가 담당해야 합니다.
 

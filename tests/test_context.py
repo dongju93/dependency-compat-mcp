@@ -30,7 +30,7 @@ from dependency_compat_mcp.domain.errors import InvariantViolation
 from dependency_compat_mcp.domain.targets import TargetId, parse_target
 
 FRAMEWORK = parse_target("pypi", "example-framework", "5.2")
-PYTHON_ID = TargetId.of(parse_target("runtime", "python", "3.13"))
+PYTHON_ID = TargetId.of(parse_target("runtime", "python", "3.13.0"))
 
 
 def check(source: str, outcome: str, *, required: bool = True) -> SourceCheck:

@@ -4,8 +4,8 @@ Two decisions from 03 carry most of the weight here and are pinned by name:
 
 * ``engines.node`` is tier **B**, not a tier-A gate, because npm only warns unless
   ``engine-strict`` is set and the server is never told the caller's npm configuration.
-* Only ``versions[<exact version>]`` is ever read. A dist-tag, a nearby release or an
-  entry that survives in ``time`` after an unpublish are all absence.
+* The exact-version endpoint is requested directly. A nearby release is never substituted,
+  and a 404 - including an unpublished release - is absence.
 
 No test touches the network: the adapter is given a fake :class:`JsonFetcher`.
 """
@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from dependency_compat_mcp.adapters.npm import NpmAdapter, parse_packument
+from dependency_compat_mcp.adapters.npm import NpmAdapter, parse_manifest
 from dependency_compat_mcp.adapters.protocol import (
     LookupFailed,
     ReleaseDocument,
@@ -50,7 +50,7 @@ from dependency_compat_mcp.infra.http import (
 FIXTURES = Path(__file__).parent / "fixtures" / "registry"
 RETRIEVED_AT = datetime(2026, 8, 12, 9, 30, tzinfo=UTC)
 NODE = TargetId(namespace="runtime", name=CanonicalName("node"))
-SAMPLE_URL = "https://registry.npmjs.org/sample-package"
+SAMPLE_URL = "https://registry.npmjs.org/sample-package/4.19.2"
 SAMPLE_PAGE = "https://www.npmjs.com/package/sample-package/v/4.19.2"
 
 
@@ -90,11 +90,9 @@ def fetch(fetcher: FakeFetcher, target: NpmTarget) -> Any:
 
 
 def sample_document(target: NpmTarget | None = None) -> ReleaseDocument:
-    document = parse_packument(
-        target or npm_target(),
-        load("npm_sample_package.json"),
-        retrieved_at=RETRIEVED_AT,
-    )
+    selected = target or npm_target()
+    payload = load("npm_sample_package.json")["versions"][str(selected.version)]
+    document = parse_manifest(selected, payload, retrieved_at=RETRIEVED_AT)
     assert isinstance(document, ReleaseDocument)
     return document
 
@@ -115,17 +113,17 @@ def facts(document: ReleaseDocument) -> tuple[Any, ...]:
 # --------------------------------------------------------------------------------------
 
 
-def test_the_packument_endpoint_is_requested() -> None:
-    fetcher = ok(load("npm_sample_package.json"))
+def test_the_exact_version_endpoint_is_requested() -> None:
+    fetcher = ok(load("npm_sample_package.json")["versions"]["4.19.2"])
     fetch(fetcher, npm_target())
     assert fetcher.requested == [SAMPLE_URL]
 
 
 def test_a_scoped_name_is_encoded_as_one_path_segment() -> None:
-    fetcher = ok(load("npm_scoped_package.json"))
+    fetcher = ok(load("npm_scoped_package.json")["versions"]["3.1.0"])
     fetch(fetcher, npm_target("@example-scope/sample-helper", "3.1.0"))
     assert fetcher.requested == [
-        "https://registry.npmjs.org/@example-scope%2Fsample-helper"
+        "https://registry.npmjs.org/@example-scope%2Fsample-helper/3.1.0"
     ]
 
 
@@ -152,34 +150,26 @@ def test_a_target_from_another_namespace_is_refused_without_a_request() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_only_the_exact_version_is_read() -> None:
+def test_the_exact_version_manifest_is_read() -> None:
     older = sample_document(npm_target(version="4.18.0"))
     statement = one_statement(older)
     # 4.18.0's own engines range, not the newest version's.
     assert statement.expression == ">= 0.10.0"
 
 
-def test_a_version_absent_from_the_packument_is_not_found() -> None:
-    target = npm_target(version="9.9.9")
-    assert fetch(ok(load("npm_sample_package.json")), target) == ReleaseNotFound(
+def test_an_unpublished_version_404_is_absence() -> None:
+    target = npm_target(version="4.19.3")
+    assert fetch(FakeFetcher(HttpNotFound(url=SAMPLE_URL)), target) == ReleaseNotFound(
         target=target
     )
 
 
-def test_an_unpublished_version_is_absence_even_though_time_remembers_it() -> None:
-    """npm has no yank: withdrawal removes the version, so it maps to absence."""
-    payload = load("npm_sample_package.json")
-    assert "4.19.3" in payload["time"]
-    assert "4.19.3" not in payload["versions"]
-    target = npm_target(version="4.19.3")
-    assert fetch(ok(payload), target) == ReleaseNotFound(target=target)
-
-
-def test_a_dist_tag_is_never_substituted_for_a_version() -> None:
-    payload = load("npm_sample_package.json")
-    assert payload["dist-tags"]["latest"] == "4.19.2"
+def test_a_different_manifest_is_an_invalid_document() -> None:
+    payload = load("npm_sample_package.json")["versions"]["4.19.2"]
     target = npm_target(version="5.0.0")
-    assert fetch(ok(payload), target) == ReleaseNotFound(target=target)
+    assert fetch(ok(payload), target) == LookupFailed(
+        target=target, detail="invalid_document"
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -237,9 +227,10 @@ def test_peer_dependencies_become_gates_with_their_own_id_prefix() -> None:
 
 
 def test_an_open_ended_range_is_recorded_as_unbounded_above() -> None:
-    document = parse_packument(
+    payload = load("npm_scoped_package.json")["versions"]["3.1.0"]
+    document = parse_manifest(
         npm_target("@example-scope/sample-helper", "3.1.0"),
-        load("npm_scoped_package.json"),
+        payload,
         retrieved_at=RETRIEVED_AT,
     )
     assert isinstance(document, ReleaseDocument)
@@ -273,10 +264,8 @@ def test_dev_dependencies_are_not_claims() -> None:
     )
 
 
-def test_released_at_comes_from_the_packument_time_map() -> None:
-    assert sample_document().released_at == datetime(
-        2026, 3, 20, 11, 24, 31, 451000, tzinfo=UTC
-    )
+def test_exact_version_manifests_have_no_release_time() -> None:
+    assert sample_document().released_at is None
 
 
 def test_npm_releases_are_never_yanked() -> None:
@@ -284,9 +273,10 @@ def test_npm_releases_are_never_yanked() -> None:
 
 
 def test_a_manifest_without_engines_produces_no_statement() -> None:
-    document = parse_packument(
+    payload = load("npm_scoped_package.json")["versions"]["3.1.0"]
+    document = parse_manifest(
         npm_target("@example-scope/sample-helper", "3.1.0"),
-        load("npm_scoped_package.json"),
+        payload,
         retrieved_at=RETRIEVED_AT,
     )
     assert isinstance(document, ReleaseDocument)
@@ -299,9 +289,9 @@ def test_a_manifest_without_engines_produces_no_statement() -> None:
 def test_an_engines_node_that_is_not_a_range_string_produces_no_statement(
     node_range: object,
 ) -> None:
-    payload = load("npm_sample_package.json")
-    payload["versions"]["4.19.2"]["engines"] = {"node": node_range}
-    document = parse_packument(npm_target(), payload, retrieved_at=RETRIEVED_AT)
+    payload = load("npm_sample_package.json")["versions"]["4.19.2"]
+    payload["engines"] = {"node": node_range}
+    document = parse_manifest(npm_target(), payload, retrieved_at=RETRIEVED_AT)
     assert isinstance(document, ReleaseDocument)
     assert not any(
         isinstance(claim, CompatibilityStatement) for claim in document.claims
@@ -311,31 +301,14 @@ def test_an_engines_node_that_is_not_a_range_string_produces_no_statement(
 def test_a_dependency_name_the_boundary_rejects_is_skipped() -> None:
     """npm names are lowercase; an identity the tool boundary would refuse must not
     enter the domain through a dependency list."""
-    payload = load("npm_sample_package.json")
-    payload["versions"]["4.19.2"]["dependencies"] = {"UPPERCASE-Name": "^1.0.0"}
-    document = parse_packument(npm_target(), payload, retrieved_at=RETRIEVED_AT)
+    payload = load("npm_sample_package.json")["versions"]["4.19.2"]
+    payload["dependencies"] = {"UPPERCASE-Name": "^1.0.0"}
+    document = parse_manifest(npm_target(), payload, retrieved_at=RETRIEVED_AT)
     assert isinstance(document, ReleaseDocument)
     assert not any(
         claim_evidence_id(claim).startswith("npm:dependencies:")
         for claim in document.claims
     )
-
-
-@pytest.mark.parametrize("published", ["not a timestamp", "", 20260320, None])
-def test_an_unreadable_publish_time_leaves_released_at_empty(published: object) -> None:
-    payload = load("npm_sample_package.json")
-    payload["time"]["4.19.2"] = published
-    document = parse_packument(npm_target(), payload, retrieved_at=RETRIEVED_AT)
-    assert isinstance(document, ReleaseDocument)
-    assert document.released_at is None
-
-
-def test_a_packument_without_a_time_map_leaves_released_at_empty() -> None:
-    payload = load("npm_sample_package.json")
-    del payload["time"]
-    document = parse_packument(npm_target(), payload, retrieved_at=RETRIEVED_AT)
-    assert isinstance(document, ReleaseDocument)
-    assert document.released_at is None
 
 
 # --------------------------------------------------------------------------------------
@@ -349,10 +322,9 @@ def test_parsing_the_same_fixture_twice_is_identical() -> None:
 
 
 def test_claim_order_does_not_depend_on_the_registry_key_order() -> None:
-    payload = load("npm_sample_package.json")
-    manifest = payload["versions"]["4.19.2"]
-    manifest["dependencies"] = dict(reversed(list(manifest["dependencies"].items())))
-    reordered = parse_packument(npm_target(), payload, retrieved_at=RETRIEVED_AT)
+    payload = load("npm_sample_package.json")["versions"]["4.19.2"]
+    payload["dependencies"] = dict(reversed(list(payload["dependencies"].items())))
+    reordered = parse_manifest(npm_target(), payload, retrieved_at=RETRIEVED_AT)
     assert isinstance(reordered, ReleaseDocument)
     assert facts(reordered) == facts(sample_document())
 
@@ -395,17 +367,25 @@ def test_a_404_is_absence() -> None:
     ],
 )
 def test_a_lookup_failure_keeps_its_code(detail: str) -> None:
-    """A large packument that trips the size ceiling must stay distinguishable from a
-    package that does not exist."""
+    """A failed response must stay distinguishable from a package that does not exist."""
     target = npm_target()
     result = fetch(FakeFetcher(HttpFailed(url=SAMPLE_URL, detail=detail)), target)
     assert result == LookupFailed(target=target, detail=detail)
 
 
 @pytest.mark.parametrize(
-    "payload", [None, [], "a string", 7, {}, {"versions": None}, {"versions": []}]
+    "payload",
+    [
+        None,
+        [],
+        "a string",
+        7,
+        {},
+        {"name": "sample-package"},
+        {"name": "sample-package", "version": []},
+    ],
 )
-def test_a_body_that_is_not_a_packument_is_a_failure_not_an_empty_document(
+def test_a_body_that_is_not_a_manifest_is_a_failure_not_an_empty_document(
     payload: object,
 ) -> None:
     target = npm_target()
@@ -414,17 +394,15 @@ def test_a_body_that_is_not_a_packument_is_a_failure_not_an_empty_document(
     )
 
 
-def test_a_manifest_that_is_not_an_object_is_absence() -> None:
+def test_a_manifest_with_an_invalid_identity_is_a_failure() -> None:
     target = npm_target()
-    assert fetch(ok({"versions": {"4.19.2": "not a manifest"}}), target) == (
-        ReleaseNotFound(target=target)
+    assert fetch(ok({"name": "UPPERCASE", "version": "4.19.2"}), target) == (
+        LookupFailed(target=target, detail="invalid_document")
     )
 
 
 def test_missing_optional_fields_are_tolerated() -> None:
-    result = fetch(
-        ok({"versions": {"4.19.2": {"name": "sample-package"}}}), npm_target()
-    )
+    result = fetch(ok({"name": "sample-package", "version": "4.19.2"}), npm_target())
     assert isinstance(result, ReleaseDocument)
     assert result.claims == ()
     assert result.released_at is None

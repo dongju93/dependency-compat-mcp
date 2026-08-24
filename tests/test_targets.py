@@ -62,7 +62,7 @@ def _semver(raw: str) -> SemverVersion:
         pytest.param("npm", "@scope/pkg~ish", "1.0.0", "@scope/pkg~ish"),
         pytest.param("npm", "~tilde-start", "0.0.1", "~tilde-start"),
         pytest.param("npm", "node-fetch", "3.3.2-beta.1", "node-fetch"),
-        ("runtime", "python", "3.13", "python"),
+        ("runtime", "python", "3.13.0", "python"),
         pytest.param("runtime", "node", "22.17.0", "node"),
     ],
 )
@@ -79,7 +79,7 @@ def test_valid_input_parses_and_preserves_the_version_spelling(
 
 def test_registry_and_runtime_targets_get_the_expected_variant() -> None:
     assert isinstance(parse_target("pypi", "django", "5.2"), PyPITarget)
-    assert isinstance(parse_target("runtime", "python", "3.13"), PythonRuntimeTarget)
+    assert isinstance(parse_target("runtime", "python", "3.13.0"), PythonRuntimeTarget)
 
 
 # --------------------------------------------------------------------------------------
@@ -141,6 +141,8 @@ def test_registry_and_runtime_targets_get_the_expected_variant() -> None:
         ("pypi", "django", "1.2 || 2.0", "version_syntax", "version"),
         ("pypi", "django", "*", "version_syntax", "version"),
         ("runtime", "python", ">=3.10,<3.14", "version_syntax", "version"),
+        ("runtime", "python", "3.13", "runtime_patch_required", "version"),
+        ("runtime", "python", "3", "runtime_patch_required", "version"),
         ("npm", "react", ">=18", "version_syntax", "version"),
         ("npm", "react", "^19", "version_syntax", "version"),
         ("npm", "react", "1.x", "version_syntax", "version"),
@@ -324,7 +326,7 @@ def test_property_classify_returns_runtime_class_exactly_for_runtime_targets() -
     targets: tuple[Target, ...] = (
         parse_target("pypi", "django", "5.2"),
         parse_target("npm", "react", "19.1.1"),
-        parse_target("runtime", "python", "3.13"),
+        parse_target("runtime", "python", "3.13.0"),
         parse_target("runtime", "node", "22.17.0"),
         # A directly constructed value must classify identically: `classify` reads the
         # variant, never the construction path.

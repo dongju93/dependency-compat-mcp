@@ -1,10 +1,14 @@
-"""npm registry packument to claims.
+"""npm registry exact-version manifests to claims.
 
-The registry has no per-version JSON endpoint, so the whole packument is fetched and
-``versions[<exact version>]`` is selected by exact key. Nothing else is accepted: no
-dist-tag, no nearest match. An unpublished version - one still listed in ``time`` but gone
-from ``versions`` - is :class:`ReleaseNotFound`, because the release genuinely cannot be
-installed any more.
+The registry's ``/<package>/<version>`` endpoint returns the manifest for one exact
+release, so the adapter fetches that document directly. Nothing else is accepted: no
+dist-tag and no nearest match. A 404 is :class:`ReleaseNotFound`, including a release that
+has been unpublished and can no longer be installed.
+
+Unlike a full packument, the exact-version document has no ``time`` map. npm
+``released_at`` is therefore unavailable and remains ``None``; the decision procedure
+must keep a date-dependent open-ceiling conclusion unknown rather than fetch a potentially
+unbounded packument or weaken the shared response-size ceiling.
 
 The tier split here is the one 03 argues for explicitly:
 
@@ -20,7 +24,7 @@ version rather than marking it, which is why it maps to absence and not to a not
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Final, assert_never
 
 from dependency_compat_mcp.adapters.protocol import (
@@ -48,6 +52,7 @@ from dependency_compat_mcp.domain.targets import (
     Target,
     TargetId,
     parse_npm_name,
+    parse_semver_version,
 )
 from dependency_compat_mcp.infra.http import (
     HttpFailed,
@@ -86,7 +91,7 @@ _NON_REGISTRY_PREFIXES: Final[tuple[str, ...]] = (
 
 
 class NpmAdapter:
-    """Fetches a packument and parses exactly one of its versions."""
+    """Fetches and parses one exact-version npm manifest."""
 
     namespace: Namespace = "npm"
     source_id: SourceId = "npm_registry"
@@ -101,21 +106,21 @@ class NpmAdapter:
         if not isinstance(target, NpmTarget):
             return LookupFailed(target=target, detail="unsupported_namespace")
 
-        result = await self._fetcher.get_json(packument_url(target))
+        result = await self._fetcher.get_json(release_url(target))
         match result:
             case HttpNotFound():
                 return ReleaseNotFound(target=target)
             case HttpFailed(detail=detail):
                 return LookupFailed(target=target, detail=detail)
             case HttpOk(payload=payload, retrieved_at=retrieved_at):
-                return parse_packument(target, payload, retrieved_at=retrieved_at)
+                return parse_manifest(target, payload, retrieved_at=retrieved_at)
             case _:  # pragma: no cover - exhaustive over HttpResult
                 assert_never(result)
 
 
-def packument_url(target: NpmTarget) -> str:
-    """The packument endpoint. A scoped name stays one segment: ``@scope%2Fpkg``."""
-    return build_url(NPM_REGISTRY_HOST, str(target.name))
+def release_url(target: NpmTarget) -> str:
+    """The exact-version endpoint; a scoped name stays one encoded path segment."""
+    return build_url(NPM_REGISTRY_HOST, str(target.name), str(target.version))
 
 
 def package_page_url(target: NpmTarget) -> str:
@@ -127,21 +132,26 @@ def package_page_url(target: NpmTarget) -> str:
     return f"https://www.npmjs.com/package/{target.name}/v/{target.version}"
 
 
-def parse_packument(
+def parse_manifest(
     target: NpmTarget, payload: object, *, retrieved_at: datetime
 ) -> ReleaseLookup:
-    """Select ``target``'s exact version from a packument and parse it. Pure."""
+    """Parse one exact-version manifest into claims and evidence. Pure."""
     if not isinstance(payload, dict):
         return LookupFailed(target=target, detail="invalid_document")
-    version_map = payload.get("versions")
-    if not isinstance(version_map, dict):
-        return LookupFailed(target=target, detail="invalid_document")
 
-    manifest = version_map.get(str(target.version))
-    if not isinstance(manifest, dict):
-        # Absent, or present but not an object. Either way this release is unusable, and
-        # an entry left in `time` (an unpublish) does not make it available again.
-        return ReleaseNotFound(target=target)
+    raw_name = payload.get("name")
+    raw_version = payload.get("version")
+    if not isinstance(raw_name, str) or not isinstance(raw_version, str):
+        return LookupFailed(target=target, detail="invalid_document")
+    try:
+        manifest_name = parse_npm_name(raw_name)
+        manifest_version = parse_semver_version(raw_version)
+    except InputError:
+        return LookupFailed(target=target, detail="invalid_document")
+    if manifest_name != target.name or manifest_version != target.version:
+        # Defence in depth: a successful endpoint response must never substitute a nearby
+        # or differently named release for the exact target the caller requested.
+        return LookupFailed(target=target, detail="invalid_document")
 
     claims: list[Claim] = []
     evidence: list[Evidence] = []
@@ -152,13 +162,13 @@ def parse_packument(
         provenance=Fetched(retrieved_at=retrieved_at),
     )
 
-    _add_engines_node(manifest, context, claims, evidence)
+    _add_engines_node(payload, context, claims, evidence)
     for section in _DEPENDENCY_SECTIONS:
-        _add_dependencies(manifest, section, context, claims, evidence)
+        _add_dependencies(payload, section, context, claims, evidence)
 
     return ReleaseDocument(
         target=target,
-        released_at=_released_at(payload, target),
+        released_at=None,
         # npm has no yank: a withdrawn version is unpublished, which is absence.
         yanked=None,
         claims=tuple(claims),
@@ -284,20 +294,3 @@ def _is_non_registry_specifier(raw_range: str) -> bool:
         return True
     # `user/repo` is GitHub shorthand; no SemVer range contains a slash.
     return "/" in candidate
-
-
-def _released_at(payload: Mapping[str, object], target: NpmTarget) -> datetime | None:
-    """When this exact version was published, from the packument's ``time`` map."""
-    times = payload.get("time")
-    if not isinstance(times, dict):
-        return None
-    raw = times.get(str(target.version))
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    return (
-        parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
-    )
