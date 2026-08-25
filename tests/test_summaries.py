@@ -6,10 +6,15 @@ is asserted to be one of those templates instantiated. Adding or reshaping a sen
 therefore fails this test until a human agrees to the new wording.
 """
 
+from datetime import UTC, datetime
+
 import pytest
 
 from dependency_compat_mcp.domain.claims import (
     EolNotApplicable,
+    EolPublished,
+    EolUnavailable,
+    EolUnpublished,
     ReleaseFacts,
     SourceCheck,
 )
@@ -17,6 +22,8 @@ from dependency_compat_mcp.domain.context import (
     ContextAvailable,
     ContextConstraint,
     ContextUnknown,
+    ReleaseLifecycle,
+    RuntimeEol,
 )
 from dependency_compat_mcp.domain.diagnostics import (
     CAUSE_KINDS,
@@ -99,6 +106,12 @@ EXPECTED_TEMPLATES: tuple[str, ...] = (
     "A required source for {target} could not be read, "
     "so no compatibility context was collected.",
     "No compatibility context was found for {target}.",
+    "{target} was released on {released_at}; "
+    "its release line reaches end of life on {eol_at}.",
+    "{target} was released on {released_at}; "
+    "its publisher states no end-of-life date for the release line.",
+    "{target} was released on {released_at}; "
+    "its official support schedule could not be read.",
 )
 
 UNKNOWN_REASONS: tuple[UnknownReason, ...] = (
@@ -315,12 +328,55 @@ def _constraint() -> ContextConstraint:
 
 def test_an_available_context_counts_the_constraints_it_carries() -> None:
     summary = summarise_context(
-        ContextAvailable(constraints=(_constraint(),), notices=(), limitations=()),
+        ContextAvailable(
+            constraints=(_constraint(),), lifecycle=None, notices=(), limitations=()
+        ),
         FRAMEWORK,
     )
     assert summary == (
         "pypi:example-framework 5.2: 1 declared constraint(s) from registry metadata."
     )
+
+
+def _lifecycle(eol: RuntimeEol) -> ContextAvailable:
+    return ContextAvailable(
+        constraints=(),
+        lifecycle=ReleaseLifecycle(
+            released_at=datetime(2024, 10, 7, tzinfo=UTC), eol=eol
+        ),
+        notices=(),
+        limitations=(),
+    )
+
+
+def test_a_published_end_of_life_is_named_with_its_date() -> None:
+    summary = summarise_context(
+        _lifecycle(EolPublished(at=datetime(2029, 10, 31, tzinfo=UTC))), PYTHON
+    )
+    assert summary == (
+        "runtime:python 3.13.0 was released on 2024-10-07; "
+        "its release line reaches end of life on 2029-10-31."
+    )
+
+
+def test_dates_are_rendered_at_the_precision_upstream_published() -> None:
+    """Midnight UTC is the adapter's comparable form, not a time anyone announced."""
+    summary = summarise_context(
+        _lifecycle(EolPublished(at=datetime(2029, 10, 31, tzinfo=UTC))), PYTHON
+    )
+    assert "T00:00:00" not in summary
+
+
+def test_an_unannounced_end_of_life_is_not_worded_as_an_unreadable_one() -> None:
+    """The distinction `EolUnpublished` and `EolUnavailable` exist for, in one sentence."""
+    unpublished = summarise_context(_lifecycle(EolUnpublished()), PYTHON)
+    unavailable = summarise_context(
+        _lifecycle(EolUnavailable(detail="timeout")), PYTHON
+    )
+
+    assert "publisher states no end-of-life date" in unpublished
+    assert "support schedule could not be read" in unavailable
+    assert unpublished != unavailable
 
 
 @pytest.mark.parametrize(
@@ -368,6 +424,8 @@ def _template_skeletons() -> set[str]:
                 counterpart="runtime:python 3.13.0",
                 target="pypi:example-framework 5.2",
                 rule="requires_python",
+                released_at="2024-10-07",
+                eol_at="2029-10-31",
                 evidence_count=0,
                 constraint_count=0,
                 change_count=0,

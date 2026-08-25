@@ -65,8 +65,10 @@ from dependency_compat_mcp.domain.claims import (
     CompatibilityStatement,
     Corroboration,
     EolNotApplicable,
+    EolPublished,
     EolStatus,
     EolUnavailable,
+    EolUnpublished,
     Evidence,
     EvidenceId,
     InstallationGate,
@@ -80,6 +82,8 @@ from dependency_compat_mcp.domain.claims import (
 from dependency_compat_mcp.domain.context import (
     ContextConstraint,
     ContextInput,
+    ReleaseLifecycle,
+    RuntimeEol,
     build_context,
 )
 from dependency_compat_mcp.domain.errors import InvariantViolation
@@ -273,8 +277,16 @@ class CompatibilityService:
     async def get_compatibility_context(
         self, target: Target
     ) -> GetCompatibilityContextResult:
-        """Return comparison material for one release. This tool never judges."""
-        side = await self._collect_one_with_budget(target, role="declaring")
+        """Return comparison material for one release. This tool never judges.
+
+        A runtime target reaches this with nothing to declare - the release indexes carry
+        no version constraints - so the material it contributes is the pair of facts its
+        publisher does state, assembled by :func:`_lifecycle_of`. That is why the support
+        schedule is fetched here as well as on the verdict path.
+        """
+        side = await self._collect_one_with_budget(
+            target, role="declaring", with_lifecycle=True
+        )
         checks = side.checks
 
         evidence: list[Evidence] = []
@@ -296,6 +308,7 @@ class CompatibilityService:
                 target=target,
                 release_found=side.found,
                 constraints=tuple(constraints),
+                lifecycle=_lifecycle_of(target, side),
                 evidence=tuple(evidence),
                 lookups=checks,
                 marker_guarded=marker_guarded,
@@ -329,10 +342,16 @@ class CompatibilityService:
             async with asyncio.timeout(self.request_budget_seconds):
                 async with asyncio.TaskGroup() as group:
                     declaring_task = group.create_task(
-                        self._collect_one(declaring, role="declaring")
+                        self._collect_one(
+                            declaring, role="declaring", with_lifecycle=False
+                        )
                     )
                     declared_task = group.create_task(
-                        self._collect_one(declared_about, role="declared_about")
+                        self._collect_one(
+                            declared_about,
+                            role="declared_about",
+                            with_lifecycle=True,
+                        )
                     )
         except TimeoutError:
             return (
@@ -346,12 +365,14 @@ class CompatibilityService:
         return declaring_task.result(), declared_task.result()
 
     async def _collect_one_with_budget(
-        self, target: Target, *, role: LookupRole
+        self, target: Target, *, role: LookupRole, with_lifecycle: bool
     ) -> _Collected:
         """Collect one target without letting it outlive the request budget."""
         try:
             async with asyncio.timeout(self.request_budget_seconds):
-                return await self._collect_one(target, role=role)
+                return await self._collect_one(
+                    target, role=role, with_lifecycle=with_lifecycle
+                )
         except TimeoutError:
             return self._timed_out(target, role)
 
@@ -396,25 +417,33 @@ class CompatibilityService:
             ),
         )
 
-    async def _collect_one(self, target: Target, *, role: LookupRole) -> _Collected:
+    async def _collect_one(
+        self, target: Target, *, role: LookupRole, with_lifecycle: bool
+    ) -> _Collected:
         match target:
             case PythonRuntimeTarget() | NodeRuntimeTarget():
-                return await self._collect_runtime(target, role=role)
+                return await self._collect_runtime(
+                    target, role=role, with_lifecycle=with_lifecycle
+                )
             case PyPITarget() | NpmTarget():
                 return await self._collect_registry(target, role=role)
             case _:
                 assert_never(target)
 
-    async def _collect_runtime(self, target: Target, *, role: LookupRole) -> _Collected:
+    async def _collect_runtime(
+        self, target: Target, *, role: LookupRole, with_lifecycle: bool
+    ) -> _Collected:
         """Read a runtime release from its official index, and its line's end of life.
 
-        The support schedule is only consulted for the side the declaration is *about*:
-        the end-of-life fact exists to bound an open-ended gate declared by the other
-        side, and ``get_compatibility_context`` reports declarations rather than judging
-        them. Fetching it anywhere else would put a row in ``sources_checked`` for a
-        document nothing in the response rests on.
+        The support schedule is consulted only where the response will rest on it, so that
+        ``sources_checked`` never names a document nothing was read from. There are exactly
+        two such places, and the caller says which one this is rather than the role being
+        read as a proxy for it: the side a declaration is *about*, whose open-ended gate
+        the end-of-life fact bounds, and ``get_compatibility_context``, which reports the
+        date as a fact about the release itself. The context tool passes ``declaring`` for
+        its single target, so ``role`` could not have told the two apart.
         """
-        if role == "declared_about":
+        if with_lifecycle:
             # Structured: both documents are fetched under one scope, and a failure in one
             # cancels the other rather than leaving it running past the response.
             async with asyncio.TaskGroup() as group:
@@ -585,6 +614,54 @@ class CompatibilityService:
         """
         if self.fetcher is not None:
             await self.fetcher.aclose()
+
+
+def _runtime_eol(eol: EolStatus) -> RuntimeEol:
+    """Narrow a collected status to the three cases a runtime release can be in.
+
+    ``EolNotApplicable`` means "this target has no support lifecycle", which is true of a
+    registry package and of nothing else. Reaching it here would mean the caller built a
+    lifecycle for a package, so it raises for the same reason
+    :func:`~dependency_compat_mcp.adapters.runtimes.runtime_of` does: a defect surfaces as
+    a tool error rather than being smuggled into a response as a fourth status.
+    """
+    match eol:
+        case EolPublished() | EolUnpublished() | EolUnavailable():
+            return eol
+        case EolNotApplicable():
+            raise InvariantViolation(
+                "a registry release has no support lifecycle to report"
+            )
+        case _:
+            assert_never(eol)
+
+
+def _lifecycle_of(target: Target, side: _Collected) -> ReleaseLifecycle | None:
+    """The lifecycle block ``get_compatibility_context`` reports, if the target has one.
+
+    ``None`` in the two cases where there is nothing to state rather than something
+    unknown: a registry release, which has no support lifecycle at all, and a runtime
+    release the index does not list or could not be read for - both of which
+    :func:`~dependency_compat_mcp.domain.context.build_context` already answers as
+    ``release_not_found`` or ``lookup_failed``, from the same lookups.
+    """
+    match target:
+        case PyPITarget() | NpmTarget():
+            return None
+        case PythonRuntimeTarget() | NodeRuntimeTarget():
+            if not side.found:
+                return None
+            if (
+                side.released_at is None
+            ):  # pragma: no cover - a found release has a date
+                raise InvariantViolation(
+                    "a runtime release found in the official index must carry its date"
+                )
+            return ReleaseLifecycle(
+                released_at=side.released_at, eol=_runtime_eol(side.eol)
+            )
+        case _:
+            assert_never(target)
 
 
 def _claim_to_constraint(

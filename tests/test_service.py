@@ -450,18 +450,86 @@ def test_a_context_lookup_failure_is_a_normal_unknown() -> None:
     assert result["evidence"] == []
 
 
-def test_a_runtime_context_reads_the_release_index_but_not_the_schedule() -> None:
-    """The support schedule bounds someone else's declaration; this tool declares nothing."""
+def test_a_runtime_context_reports_its_release_date_and_end_of_life() -> None:
+    """A runtime declares nothing, so its own publisher's two facts are the material.
+
+    Both official documents are read here, unlike on the verdict path's declaring side:
+    the end-of-life date is what the response rests on rather than something bounding
+    someone else's gate, so `sources_checked` names the schedule it came from.
+    """
     fetcher = FakeFetcher()
+    result = _context(build_service(fetcher), ("runtime", "python", "3.8.0"))
+
+    assert result["availability"] == "available"
+    assert result["constraints"] == []
+    assert result["lifecycle"] == {
+        "released_at": "2019-10-14",
+        "end_of_life": {"status": "published", "at": "2024-10-07"},
+    }
+    assert PYTHON_RELEASE_CYCLE_URL in fetcher.calls
+    assert {check["source"] for check in result["sources_checked"]} == {
+        "python_release_index",
+        "python_release_cycle",
+    }
+
+
+def test_a_month_precision_end_of_life_is_reported_as_unpublished() -> None:
+    """Upstream states `2029-10` for a line still in support; a day is not invented."""
+    result = _context(build_service(FakeFetcher()), ("runtime", "python", "3.13.0"))
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"]["end_of_life"] == {"status": "unpublished"}
+
+
+def test_an_unreadable_schedule_narrows_a_runtime_context_without_withdrawing_it() -> (
+    None
+):
+    """The index is required and the schedule is not, on this path too."""
+    fetcher = FakeFetcher(failures={PYTHON_RELEASE_CYCLE_URL: "timeout"})
     result = _context(build_service(fetcher), ("runtime", "python", "3.13.0"))
 
-    assert result["availability"] == "unknown"
-    assert result["reason"] == "evidence_not_found"
-    assert _outcome(result, "python_release_index") == "ok"
-    assert PYTHON_RELEASE_CYCLE_URL not in fetcher.calls
-    assert {check["source"] for check in result["sources_checked"]} == {
-        "python_release_index"
+    assert result["availability"] == "available"
+    assert result["lifecycle"]["released_at"] == "2024-10-07"
+    assert result["lifecycle"]["end_of_life"] == {
+        "status": "unavailable",
+        "detail": "timeout",
     }
+    assert _codes(result, "limitations") == ["source_unavailable"]
+
+
+def test_a_node_context_answers_from_its_own_two_documents() -> None:
+    """Same shape for the other runtime: neither namespace is answerable in one tool only."""
+    result = _context(build_service(FakeFetcher()), ("runtime", "node", "22.17.0"))
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"] == {
+        "released_at": "2025-06-24",
+        "end_of_life": {"status": "published", "at": "2027-04-30"},
+    }
+
+
+def test_a_runtime_release_the_index_does_not_list_has_no_lifecycle() -> None:
+    """`release_not_found` still outranks everything; a lifecycle cannot assert existence."""
+    result = _context(build_service(FakeFetcher()), ("runtime", "python", "3.13.99"))
+
+    assert result["availability"] == "unknown"
+    assert result["reason"] == "release_not_found"
+    assert result["lifecycle"] is None
+
+
+def test_a_registry_context_carries_no_lifecycle() -> None:
+    """A PyPI release has no support schedule, and `null` says so without a fourth status."""
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "Django", "5.2", requires_python=">=3.10"
+            )
+        }
+    )
+    result = _context(build_service(fetcher), ("pypi", "django", "5.2"))
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"] is None
 
 
 def test_context_collection_obeys_the_call_level_budget() -> None:
