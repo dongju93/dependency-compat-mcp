@@ -21,12 +21,19 @@ MCP client, so this text is a machine-readable gloss of the structured result, n
 translation surface.
 """
 
+from datetime import datetime
 from typing import Final, assert_never
 
+from dependency_compat_mcp.domain.claims import (
+    EolPublished,
+    EolUnavailable,
+    EolUnpublished,
+)
 from dependency_compat_mcp.domain.context import (
     ContextAvailable,
     ContextOutcome,
     ContextUnknown,
+    ReleaseLifecycle,
 )
 from dependency_compat_mcp.domain.diagnostics import (
     ConditionalClaim,
@@ -163,6 +170,24 @@ _CONTEXT_LOOKUP_FAILED: Final = (
 )
 _CONTEXT_EVIDENCE_NOT_FOUND: Final = "No compatibility context was found for {target}."
 
+# One sentence per end-of-life case, rather than one sentence with the date left out when
+# there is none. "Upstream announced no date" and "the schedule could not be read" are the
+# distinction `EolUnpublished` and `EolUnavailable` exist to keep apart, and a summary that
+# rendered both as a missing value would put them back together in the one field a caller
+# reads first.
+_CONTEXT_LIFECYCLE_EOL_PUBLISHED: Final = (
+    "{target} was released on {released_at}; "
+    "its release line reaches end of life on {eol_at}."
+)
+_CONTEXT_LIFECYCLE_EOL_UNPUBLISHED: Final = (
+    "{target} was released on {released_at}; "
+    "its publisher states no end-of-life date for the release line."
+)
+_CONTEXT_LIFECYCLE_EOL_UNAVAILABLE: Final = (
+    "{target} was released on {released_at}; "
+    "its official support schedule could not be read."
+)
+
 TEMPLATES: Final[tuple[str, ...]] = (
     _SUPPORTED,
     _UNSUPPORTED,
@@ -186,6 +211,9 @@ TEMPLATES: Final[tuple[str, ...]] = (
     _CONTEXT_RELEASE_NOT_FOUND,
     _CONTEXT_LOOKUP_FAILED,
     _CONTEXT_EVIDENCE_NOT_FOUND,
+    _CONTEXT_LIFECYCLE_EOL_PUBLISHED,
+    _CONTEXT_LIFECYCLE_EOL_UNPUBLISHED,
+    _CONTEXT_LIFECYCLE_EOL_UNAVAILABLE,
 )
 
 
@@ -300,14 +328,54 @@ def summarise_verdict(verdict: Verdict, resolution: RelationResolution) -> str:
             assert_never(resolution)
 
 
+def _render_day(moment: datetime) -> str:
+    """Render an official date at the precision its publisher actually stated.
+
+    Both runtime documents carry day-precision dates, which the adapter widens to midnight
+    UTC so it has one comparable type. Printing the instant back would hand the caller a
+    time of day upstream never announced - the same manufactured precision the adapter
+    refuses when it declines to pad a month to a day.
+    """
+    return moment.strftime("%Y-%m-%d")
+
+
+def _lifecycle_summary(lifecycle: ReleaseLifecycle, rendered: str) -> str:
+    released_at = _render_day(lifecycle.released_at)
+    match lifecycle.eol:
+        case EolPublished(at=at):
+            return _CONTEXT_LIFECYCLE_EOL_PUBLISHED.format(
+                target=rendered, released_at=released_at, eol_at=_render_day(at)
+            )
+        case EolUnpublished():
+            return _CONTEXT_LIFECYCLE_EOL_UNPUBLISHED.format(
+                target=rendered, released_at=released_at
+            )
+        case EolUnavailable():
+            return _CONTEXT_LIFECYCLE_EOL_UNAVAILABLE.format(
+                target=rendered, released_at=released_at
+            )
+        case never:
+            assert_never(never)
+
+
 def summarise_context(outcome: ContextOutcome, target: Target) -> str:
     """Render the one-line summary for a ``get_compatibility_context`` result."""
     rendered = render_target(target)
     match outcome:
-        case ContextAvailable(constraints=constraints):
-            return _CONTEXT_AVAILABLE.format(
-                target=rendered, constraint_count=len(constraints)
-            )
+        case ContextAvailable(constraints=constraints, lifecycle=lifecycle):
+            # Constraints first: a release that declares any is being asked what it
+            # declares, and only a runtime - which declares nothing - reaches the second
+            # branch. Ordering rather than an either/or check, because the sum type is
+            # what makes the pair exclusive and this function does not re-litigate it.
+            if constraints:
+                return _CONTEXT_AVAILABLE.format(
+                    target=rendered, constraint_count=len(constraints)
+                )
+            if lifecycle is None:  # pragma: no cover - forbidden by ContextAvailable
+                raise InvariantViolation(
+                    "an available context must carry a constraint or a lifecycle"
+                )
+            return _lifecycle_summary(lifecycle, rendered)
         case ContextUnknown(reason=reason):
             match reason:
                 case "release_not_found":

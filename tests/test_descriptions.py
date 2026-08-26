@@ -198,6 +198,21 @@ def test_descriptions_are_single_line_constants() -> None:
         assert text == text.strip()
 
 
+def test_server_instructions_route_a_release_line_to_the_tool_that_takes_it() -> None:
+    """Cross-tool division of labour lives here, not duplicated into each description.
+
+    The tool descriptions are held to a word budget precisely so they stay decision-sized;
+    "which of the two tools answers this shape of question" is a server-level fact and has
+    one home. Without it a caller holding a release line only ever learns the rule by
+    being refused.
+    """
+    text = SERVER_INSTRUCTIONS.lower()
+
+    assert "release line" in text
+    assert "patch component" in text
+    assert text.index("release line") < text.index("the server never receives")
+
+
 def test_server_instructions_point_at_both_tools_and_keep_the_same_boundaries() -> None:
     text = SERVER_INSTRUCTIONS.lower()
 

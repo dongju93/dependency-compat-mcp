@@ -390,14 +390,41 @@ def parse_pep440_version(raw: str) -> Pep440Version:
     return Pep440Version(raw=raw, parsed=parsed)
 
 
+# The sentence both runtime parsers append to `runtime_patch_required`. A release line is
+# the shape the question usually arrives in - `requires_python` and `engines.node` are
+# written per line, and `.python-version` and `.nvmrc` hold one - so the refusal has to
+# name the tool that does take it. Shared, so the two runtimes cannot drift into giving
+# different advice for the same mistake.
+_LINE_GRANULARITY_HINT: Final = (
+    "A bare release line is not a release this server can compare; to ask about the line "
+    "itself, call get_compatibility_context on the package and compare the constraint it "
+    "declares."
+)
+
+# One or two numeric components and nothing else: `22`, `22.11`. Exactly the shape of a
+# Node release line, and never the shape of an exact SemVer release, so recognising it
+# here takes nothing away from `parse_semver_version`.
+_NODE_RELEASE_LINE_RE: Final = re.compile(r"\d+(?:\.\d+)?")
+
+
 def _parse_python_runtime_version(raw: str) -> Pep440Version:
-    """Parse a concrete CPython release, including its patch component."""
+    """Parse a concrete CPython release, including its patch component.
+
+    ``3.13`` is well-formed PEP 440, so without this it would parse, miss the release
+    index and come back as ``release_not_found`` - a factual claim that CPython 3.13 does
+    not exist. Refusing here keeps the two apart: a line is a contract violation the
+    caller can fix, not a fact about the runtime.
+
+    The message names the tool that *does* answer a line-shaped question, because the
+    caller is a language model and this string is the only place it learns that asking
+    about ``requires_python`` at line granularity is in scope at all - just not here.
+    """
     version = parse_pep440_version(raw)
     if len(version.parsed.release) < 3:
         raise InputError(
             "runtime_patch_required",
             "Python runtime version must include major, minor, and patch components "
-            "(for example, '3.13.7').",
+            f"(for example, '3.13.7'). {_LINE_GRANULARITY_HINT}",
             field="version",
         )
     return version
@@ -435,6 +462,29 @@ def parse_semver_version(raw: str) -> SemverVersion:
     return SemverVersion(raw=raw, parsed=nodesemver.make_semver(raw, loose=False))
 
 
+def _parse_node_runtime_version(raw: str) -> SemverVersion:
+    """Parse a concrete Node release, telling a release line from a malformed version.
+
+    The line check runs *before* the shared SemVer parser rather than after it, which is
+    the mirror image of the Python side and forced by the two grammars: ``3.13`` is valid
+    PEP 440 and can only be caught once parsed, while ``22`` never reaches a parsed form
+    at all - node-semver simply refuses it.
+
+    Without this a caller holding an ``.nvmrc`` is told its contents are a range, wildcard
+    or union. That is both wrong - ``22`` is none of those - and unactionable, and it would
+    make the same mistake answer differently on the two runtimes.
+    """
+    _reject_untrimmed("version", raw, maximum=MAX_VERSION_LENGTH)
+    if _NODE_RELEASE_LINE_RE.fullmatch(raw):
+        raise InputError(
+            "runtime_patch_required",
+            "Node runtime version must include major, minor, and patch components "
+            f"(for example, '22.11.0'). {_LINE_GRANULARITY_HINT}",
+            field="version",
+        )
+    return parse_semver_version(raw)
+
+
 def parse_target(namespace: str, name: str, version: str) -> Target:
     """Parse one ``TargetInput`` into the domain sum type.
 
@@ -459,7 +509,9 @@ def parse_target(namespace: str, name: str, version: str) -> Target:
                         version=_parse_python_runtime_version(version)
                     )
                 case "node":
-                    return NodeRuntimeTarget(version=parse_semver_version(version))
+                    return NodeRuntimeTarget(
+                        version=_parse_node_runtime_version(version)
+                    )
                 case never:
                     assert_never(never)
         case _:

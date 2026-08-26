@@ -7,6 +7,11 @@ against every shape the assembler can be handed.
 ``depth`` used to be the second such fact. It is gone with the evidence tier it described -
 every constraint now comes from the release's own registry metadata, fetched for this
 request, so there is no shallower and deeper answer to distinguish.
+
+Material is now two-shaped: constraints from a registry release, a lifecycle from a runtime
+release. The tests below assert the property that keeps ``availability`` honest across both
+- an ``available`` outcome is never empty - rather than asserting which of the two fields a
+given target kind fills, which is the service's business.
 """
 
 from datetime import UTC, datetime
@@ -14,6 +19,9 @@ from datetime import UTC, datetime
 import pytest
 
 from dependency_compat_mcp.domain.claims import (
+    EolPublished,
+    EolUnavailable,
+    EolUnpublished,
     Evidence,
     Fetched,
     SourceCheck,
@@ -24,6 +32,8 @@ from dependency_compat_mcp.domain.context import (
     ContextConstraint,
     ContextInput,
     ContextUnknown,
+    ReleaseLifecycle,
+    RuntimeEol,
     build_context,
 )
 from dependency_compat_mcp.domain.errors import InvariantViolation
@@ -78,10 +88,19 @@ def constraint(*evidence_ids: str) -> ContextConstraint:
 CATALOGUE: tuple[Evidence, ...] = (registry_evidence(),)
 
 
+ANNOUNCED_EOL = EolPublished(at=datetime(2029, 10, 31, tzinfo=UTC))
+
+
+def lifecycle(eol: RuntimeEol = ANNOUNCED_EOL) -> ReleaseLifecycle:
+    """A runtime's two published facts. ``eol`` defaults to a real, announced date."""
+    return ReleaseLifecycle(released_at=datetime(2024, 10, 7, tzinfo=UTC), eol=eol)
+
+
 def context(
     *,
     release_found: bool = True,
     constraints: tuple[ContextConstraint, ...] = (),
+    lifecycle_facts: ReleaseLifecycle | None = None,
     evidence: tuple[Evidence, ...] = CATALOGUE,
     lookups: tuple[SourceCheck, ...] = OK_LOOKUPS,
     marker_guarded: bool = False,
@@ -91,6 +110,7 @@ def context(
         target=FRAMEWORK,
         release_found=release_found,
         constraints=constraints,
+        lifecycle=lifecycle_facts,
         evidence=evidence,
         lookups=lookups,
         marker_guarded=marker_guarded,
@@ -130,6 +150,35 @@ def test_a_single_constraint_makes_the_context_available() -> None:
     outcome = build_context(context(constraints=(constraint(),)))
     assert isinstance(outcome, ContextAvailable)
     assert outcome.constraints == (constraint(),)
+    assert outcome.lifecycle is None
+
+
+def test_a_lifecycle_alone_makes_the_context_available() -> None:
+    """A runtime declares no constraints, so this is the only way it is ever answered."""
+    outcome = build_context(context(lifecycle_facts=lifecycle()))
+    assert isinstance(outcome, ContextAvailable)
+    assert outcome.constraints == ()
+    assert outcome.lifecycle == lifecycle()
+
+
+@pytest.mark.parametrize(
+    "eol", [ANNOUNCED_EOL, EolUnpublished(), EolUnavailable(detail="timeout")]
+)
+def test_every_runtime_end_of_life_case_still_carries_the_release_date(
+    eol: RuntimeEol,
+) -> None:
+    """An unreadable schedule narrows what is known; it does not withdraw the release."""
+    outcome = build_context(context(lifecycle_facts=lifecycle(eol)))
+    assert isinstance(outcome, ContextAvailable)
+    assert outcome.lifecycle is not None
+    assert outcome.lifecycle.eol == eol
+
+
+def test_a_missing_release_outranks_a_lifecycle() -> None:
+    """`release_not_found` rests on the index; a lifecycle cannot talk over it."""
+    outcome = build_context(context(release_found=False, lifecycle_facts=lifecycle()))
+    assert isinstance(outcome, ContextUnknown)
+    assert outcome.reason == "release_not_found"
 
 
 # --------------------------------------------------------------------------------------
@@ -196,7 +245,7 @@ def test_a_dangling_evidence_reference_cannot_be_assembled() -> None:
 
 def test_an_available_context_cannot_be_empty() -> None:
     with pytest.raises(InvariantViolation):
-        ContextAvailable(constraints=(), notices=(), limitations=())
+        ContextAvailable(constraints=(), lifecycle=None, notices=(), limitations=())
 
 
 # --------------------------------------------------------------------------------------
@@ -209,11 +258,13 @@ def test_build_context_is_total_and_deterministic() -> None:
         context(
             release_found=release_found,
             constraints=constraints,
+            lifecycle_facts=lifecycle_facts,
             lookups=lookups,
             marker_guarded=marker_guarded,
         )
         for release_found in (True, False)
         for constraints in ((), (constraint(),))
+        for lifecycle_facts in (None, lifecycle())
         for lookups in (
             OK_LOOKUPS,
             (check("pypi_json", "failed"),),

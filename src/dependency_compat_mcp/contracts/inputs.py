@@ -62,7 +62,11 @@ class TargetInput(BaseModel):
             description=(
                 "One exact release. Ranges, wildcards and unions such as '>=3.10,<3.14', "
                 "'^19' or '1.x' are rejected. Runtime targets require a complete release "
-                "including the patch component, for example python 3.13.7 or node 22.11.0."
+                "including the patch component, for example python 3.13.7 or node 22.11.0. "
+                "When a runtime is known only as a release line such as 3.13 or 22, that "
+                "is a question about a line rather than a release: call "
+                "get_compatibility_context on the package instead, which returns the "
+                "declared constraint verbatim for the line to be compared against."
             ),
         ),
     ]
