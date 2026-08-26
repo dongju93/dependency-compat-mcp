@@ -48,6 +48,32 @@ class SlowFetcher(FakeFetcher):
         raise AssertionError("the request budget did not cancel the registry lookup")
 
 
+class StallingFetcher(FakeFetcher):
+    """Hangs on the named URLs and answers every other one at once.
+
+    :class:`SlowFetcher` stalls the whole request, so every lookup is unfinished when the
+    budget expires. This one stalls a single document, which is the case where the server
+    holds a completed answer it must not throw away with the cancelled task.
+    """
+
+    def __init__(self, stalled: set[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.stalled = stalled
+        self.cancelled = 0
+
+    @override
+    async def get_json(self, url: str) -> HttpResult:
+        if url not in self.stalled:
+            return await super().get_json(url)
+        self.calls.append(url)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        raise AssertionError("the request budget did not cancel the stalled lookup")
+
+
 def _check(
     service: CompatibilityService,
     subject: tuple[str, str, str],
@@ -1062,3 +1088,106 @@ def test_the_budget_cancels_both_runtime_documents_together() -> None:
     assert _outcome(result, "python_release_index") == "failed"
     # The registry lookup plus both official runtime documents.
     assert fetcher.cancelled == 3
+
+
+def test_a_stalled_schedule_does_not_withdraw_the_release_the_index_confirmed() -> None:
+    """A budget spent on the optional document is an optional failure, not a required one.
+
+    The release index answered; only the support schedule was still in flight when the
+    budget expired. Reporting the index as ``failed`` would answer ``lookup_failed`` about
+    a release whose existence and date the server had already read from python.org.
+    """
+    fetcher = StallingFetcher(
+        {PYTHON_RELEASE_CYCLE_URL},
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "Django", "5.2", requires_python=">=3.10"
+            )
+        },
+    )
+    result = _check(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("pypi", "django", "5.2"),
+        ("runtime", "python", "3.12.0"),
+    )
+
+    # The same answer an unreadable schedule produces for any other reason.
+    assert result["verdict"] == "unknown"
+    assert result["reason"] == "insufficient_evidence"
+    assert [cause["kind"] for cause in result["decision_causes"]] == [
+        "lifecycle_unavailable"
+    ]
+    assert "source_unavailable" in _codes(result, "limitations")
+    assert _outcome(result, "python_release_index") == "ok"
+    schedule = _row(result, "python_release_cycle")
+    assert (schedule["outcome"], schedule["required"], schedule["detail"]) == (
+        "failed",
+        False,
+        "timeout",
+    )
+    assert fetcher.cancelled == 1
+
+
+def test_a_stalled_schedule_does_not_withdraw_a_confirmed_missing_release() -> None:
+    """The other fact the index settles survives the same way.
+
+    ``3.13.99`` was read and is not listed. That is ``release_not_found`` - a claim about
+    a document that was read - and it must not decay into ``lookup_failed``.
+    """
+    fetcher = StallingFetcher(
+        {PYTHON_RELEASE_CYCLE_URL},
+        payloads={
+            pypi_url("app", "1.0"): pypi_release("app", "1.0", requires_python=">=3.10")
+        },
+    )
+    result = _check(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.13.99"),
+    )
+
+    assert result["reason"] == "release_not_found"
+    assert _row(result, "python_release_index")["outcome"] == "not_found"
+
+
+def test_a_stalled_schedule_narrows_a_runtime_context_without_withdrawing_it() -> None:
+    """The context tool reads the schedule too, and loses no more than the schedule."""
+    fetcher = StallingFetcher({PYTHON_RELEASE_CYCLE_URL})
+    result = _context(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("runtime", "python", "3.13.0"),
+    )
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"]["released_at"] == "2024-10-07"
+    assert result["lifecycle"]["end_of_life"] == {
+        "status": "unavailable",
+        "detail": "timeout",
+    }
+    assert _codes(result, "limitations") == ["source_unavailable"]
+
+
+def test_a_stalled_release_index_is_still_a_required_failure() -> None:
+    """The asymmetry holds in the other direction: the required document decides.
+
+    The schedule answering first buys nothing - without the index the server cannot say
+    whether the release exists, and only the source it can prove it opened is reported.
+    """
+    fetcher = StallingFetcher(
+        {PYTHON_RELEASE_INDEX_URL},
+        payloads={
+            pypi_url("app", "1.0"): pypi_release("app", "1.0", requires_python=">=3.10")
+        },
+    )
+    result = _check(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.13.0"),
+    )
+
+    assert result["reason"] == "lookup_failed"
+    assert _outcome(result, "python_release_index") == "failed"
+    assert [check["source"] for check in result["sources_checked"]] == [
+        "pypi_json",
+        "python_release_index",
+    ]
