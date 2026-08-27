@@ -247,14 +247,24 @@ async def test_check_output_schema_is_the_three_variant_sum_type(
         "environment_marker",
         "extra_marker",
     ]
-    assert sorted(schema["$defs"]["UnprovenKind"]["enum"]) == [
+    assert sorted(schema["$defs"]["OtherUnprovenKind"]["enum"]) == [
         "claim_outside_range",
         "lifecycle_unavailable",
-        "open_upper_bound",
+        "release_order_unavailable",
         "stale_lower_bound",
         "tier_c_only",
         "uncomparable_claim",
     ]
+    # `release_order_unavailable` belongs to the plain variant on purpose: it is the open
+    # ceiling with no way forward, and `OpenUpperBoundOut`'s `next_actions` would tell a
+    # caller to re-ask a question that returns this same cause every time.
+    assert "release_order_unavailable" not in str(
+        schema["$defs"]["OpenUpperBoundOut"]["properties"]["kind"]
+    )
+    open_upper_bound = schema["$defs"]["OpenUpperBoundOut"]
+    next_actions = open_upper_bound["properties"]["next_actions"]
+    assert next_actions["minItems"] == next_actions["maxItems"] == 1
+    assert next_actions["prefixItems"][0]["const"] == "check_newer_declaring_release"
     assert (
         schema["$defs"]["UnprovenClaimOut"]["properties"]["evidence_ids"]["minItems"]
         == 1
@@ -314,11 +324,43 @@ async def test_context_output_schema_is_the_two_variant_sum_type(
         variant = schema["$defs"][name]
         assert "constraints" in variant["required"]
         assert "sources_checked" in variant["required"]
+        # Declared on both variants, so "no lifecycle" is a null a caller can read rather
+        # than a key whose absence it has to interpret.
+        assert "lifecycle" in variant["required"]
         # The curated tier is gone, and so is the field that described how deep it went.
         assert "depth" not in variant["properties"]
         assert "changes" not in variant["properties"]
     assert "reason" in schema["$defs"]["ContextUnknownResult"]["required"]
     assert "reason" not in schema["$defs"]["ContextAvailableResult"]["properties"]
+
+
+@pytest.mark.anyio
+async def test_the_lifecycle_end_of_life_is_published_as_a_three_variant_sum_type(
+    server: MCPServer,
+) -> None:
+    """The three states a runtime's end of life can be in, kept apart on the wire.
+
+    "Upstream announced no date" and "the schedule could not be read" are the distinction
+    the domain refuses to collapse, so a nullable date here would undo it at the boundary.
+    """
+    async with Client(server) as client:
+        schema = _tool(
+            (await client.list_tools()).tools, "get_compatibility_context"
+        ).output_schema
+
+    lifecycle = schema["$defs"]["LifecycleOut"]["properties"]
+    # The advertised precision has to be the emitted one: a `date-time` here would promise
+    # a time of day no official document publishes.
+    assert lifecycle["released_at"]["format"] == "date"
+
+    eol = schema["$defs"]["EolOut"]
+    assert eol["discriminator"]["propertyName"] == "status"
+    assert sorted(eol["discriminator"]["mapping"]) == [
+        "published",
+        "unavailable",
+        "unpublished",
+    ]
+    assert "at" not in schema["$defs"]["EolUnpublishedOut"]["properties"]
 
 
 @pytest.mark.anyio
@@ -564,3 +606,24 @@ async def test_context_tool_round_trips(server: MCPServer) -> None:
     assert result.is_error is False
     structured = result.structured_content
     assert structured["availability"] == "available"
+    assert structured["lifecycle"] is None
+
+
+@pytest.mark.anyio
+async def test_a_runtime_context_round_trips_with_its_lifecycle(
+    server: MCPServer,
+) -> None:
+    """The namespace that used to be answerable in only one of the two tools."""
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "get_compatibility_context",
+            {"target": {"namespace": "runtime", "name": "python", "version": "3.8.0"}},
+        )
+
+    assert result.is_error is False
+    structured = result.structured_content
+    assert structured["availability"] == "available"
+    assert structured["lifecycle"] == {
+        "released_at": "2019-10-14",
+        "end_of_life": {"status": "published", "at": "2024-10-07"},
+    }

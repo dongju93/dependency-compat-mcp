@@ -35,6 +35,7 @@ __all__ = [
     "LimitationCode",
     "Notice",
     "NoticeCode",
+    "OtherUnprovenKind",
     "UnprovenClaim",
     "UnprovenKind",
     "cause_evidence_ids",
@@ -124,8 +125,8 @@ type GuardKind = Literal["environment_marker", "extra_marker"]
 # Every cause kind except the conditional one, which is a separate type because it
 # carries a marker. Named so the summary table can be keyed by it and be *total*: adding
 # a kind without a sentence for it then fails to type-check rather than at request time.
-type UnprovenKind = Literal[
-    "open_upper_bound",
+type OtherUnprovenKind = Literal[
+    "release_order_unavailable",
     "stale_lower_bound",
     "lifecycle_unavailable",
     "tier_c_only",
@@ -133,18 +134,23 @@ type UnprovenKind = Literal[
     "uncomparable_claim",
 ]
 
+type UnprovenKind = Literal["open_upper_bound"] | OtherUnprovenKind
+
 type CauseKind = Literal["conditional_claim"] | UnprovenKind
 
 # Priority order, most actionable to the caller first, and the tie-break that makes the
 # rendered summary deterministic. A conditional claim leads because the caller can settle
 # it by naming an environment or an extra; the two bound rules follow because they describe
-# evidence that exists but stops short. `lifecycle_unavailable` sits next to them because
-# it is the same open-ended gate with the *other* half of the check missing, and it must
-# never be silently outranked into a decided verdict. The last three report claims that
-# were read and decided nothing.
+# evidence that exists but stops short. Each is paired with the case where the *same*
+# open-ended gate was read but the fact that would close it could not be: publication order
+# for the ceiling, the support schedule for the floor. Those pairs are adjacent because the
+# difference between them is what the caller can do next, and neither may be silently
+# outranked into a decided verdict. The last three report claims that were read and decided
+# nothing.
 CAUSE_KINDS: Final[tuple[CauseKind, ...]] = (
     "conditional_claim",
     "open_upper_bound",
+    "release_order_unavailable",
     "stale_lower_bound",
     "lifecycle_unavailable",
     "tier_c_only",

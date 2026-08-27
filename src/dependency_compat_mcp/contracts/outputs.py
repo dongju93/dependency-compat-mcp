@@ -21,7 +21,7 @@ something it should not have been able to assemble, so the failure surfaces as a
 error (03 step 7).
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Literal, Self
 
 from pydantic import (
@@ -38,7 +38,7 @@ from dependency_compat_mcp.domain.diagnostics import (
     GuardKind,
     LimitationCode,
     NoticeCode,
-    UnprovenKind,
+    OtherUnprovenKind,
 )
 from dependency_compat_mcp.domain.relations import Direction, RuleName
 from dependency_compat_mcp.domain.targets import Namespace, VersionScheme
@@ -53,13 +53,19 @@ __all__ = [
     "ContextUnknownResult",
     "DecidedMarkerOut",
     "DecisionCauseOut",
+    "EolOut",
+    "EolPublishedOut",
+    "EolUnavailableOut",
+    "EolUnpublishedOut",
     "EvidenceOut",
     "FetchedProvenanceOut",
     "GetCompatibilityContextResult",
+    "LifecycleOut",
     "LimitationOut",
     "MarkerGuardOut",
     "NarrativeEvidenceOut",
     "NoticeOut",
+    "OpenUpperBoundOut",
     "RelationOut",
     "ResolvedRelationOut",
     "SourceCheckOut",
@@ -228,14 +234,28 @@ class ConditionalClaimOut(_Out):
 class UnprovenClaimOut(_Out):
     """Evidence that was read and understood, but stops short of settling the question."""
 
-    # The domain's own set, not a restatement of it: two lists to keep in step is how a
-    # published schema drifts from the values the server can actually produce.
-    kind: UnprovenKind
+    kind: OtherUnprovenKind
     evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
 
 
+class OpenUpperBoundOut(_Out):
+    """A satisfied open-ended gate that settles nothing on its own.
+
+    The declaring release predates the release asked about and the gate names no
+    ceiling, so asking about a later declaring release is the next exact-version question
+    the tool can answer. The action is part of this variant rather than an optional field
+    on every cause, so an open upper bound with no path forward has no public
+    representation.
+    """
+
+    kind: Literal["open_upper_bound"] = "open_upper_bound"
+    evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
+    next_actions: tuple[Literal["check_newer_declaring_release"]]
+
+
 type DecisionCauseOut = Annotated[
-    ConditionalClaimOut | UnprovenClaimOut, Field(discriminator="kind")
+    ConditionalClaimOut | OpenUpperBoundOut | UnprovenClaimOut,
+    Field(discriminator="kind"),
 ]
 
 
@@ -404,6 +424,62 @@ class ConstraintOut(_Out):
     evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
 
 
+class EolPublishedOut(_Out):
+    """Upstream has announced a day-precision end of life for this release line."""
+
+    status: Literal["published"] = "published"
+    # `date`, not `datetime`: the schedules publish a day, which the adapter widens to
+    # midnight UTC only so it has one comparable type internally. Narrowing back here
+    # keeps the advertised schema (`format: date`) and the emitted value the same claim -
+    # a `datetime` would publish a time of day upstream never announced, and a serialiser
+    # that printed only the day would leave the schema saying otherwise.
+    at: date
+
+
+class EolUnpublishedOut(_Out):
+    """The schedule was read and announces no end-of-life date for this line.
+
+    It has no date field at all, rather than a null one: "read, nothing announced" is a
+    complete answer, and a key spelled ``at: null`` invites a caller to treat it as the
+    same missing value :class:`EolUnavailableOut` would have produced.
+    """
+
+    status: Literal["unpublished"] = "unpublished"
+
+
+class EolUnavailableOut(_Out):
+    """The schedule could not be read, so nothing about end of life is known.
+
+    ``detail`` is the same stable code the matching ``sources_checked`` row carries, so a
+    caller can act on the failure without correlating two lists by hand.
+    """
+
+    status: Literal["unavailable"] = "unavailable"
+    detail: str
+
+
+type EolOut = Annotated[
+    EolPublishedOut | EolUnpublishedOut | EolUnavailableOut,
+    Field(discriminator="status"),
+]
+
+
+class LifecycleOut(_Out):
+    """What a runtime's publisher states about one release: when, and until when.
+
+    Present only for a runtime target. A registry release has no support lifecycle, and
+    ``null`` says that more honestly than a fourth end-of-life status meaning "not a
+    runtime" would - the same reason the domain narrows its four-way status to three here.
+
+    No ``evidence_ids``: unlike a constraint, this is not an expression quoted out of a
+    document for the caller to compare, it is the document's own answer. The ``sources_
+    checked`` rows for the release index and the support schedule are what it rests on.
+    """
+
+    released_at: date
+    end_of_life: EolOut
+
+
 class _ContextBase(_Out):
     # Same reason as `_VerdictBase.verdict`: availability first, then the body.
     availability: str
@@ -411,6 +487,10 @@ class _ContextBase(_Out):
     target: TargetOut
     summary: str
     constraints: tuple[ConstraintOut, ...]
+    # Always present, ``null`` when the target has no lifecycle - the same rule `notices`
+    # follows. A key that disappears would make "this is a package" and "this field was
+    # forgotten" the same observation on the wire.
+    lifecycle: LifecycleOut | None
     notices: tuple[NoticeOut, ...]
     limitations: tuple[LimitationOut, ...]
     sources_checked: tuple[SourceCheckOut, ...]
@@ -435,8 +515,10 @@ class ContextAvailableResult(_ContextBase):
 
     @model_validator(mode="after")
     def _require_material(self) -> Self:
-        if not self.constraints:
-            raise ValueError("an available context must carry a constraint")
+        if not self.constraints and self.lifecycle is None:
+            raise ValueError(
+                "an available context must carry a constraint or a lifecycle"
+            )
         return self
 
 
@@ -446,8 +528,8 @@ class ContextUnknownResult(_ContextBase):
 
     @model_validator(mode="after")
     def _require_emptiness(self) -> Self:
-        if self.constraints:
-            raise ValueError("an unknown context must not carry constraints")
+        if self.constraints or self.lifecycle is not None:
+            raise ValueError("an unknown context must carry no material")
         return self
 
 

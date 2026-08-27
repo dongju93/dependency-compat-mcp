@@ -40,8 +40,17 @@ __all__ = [
 # (`~=2.2` means `>=2.2, ==2.*`); `==` with or without a `.*` suffix always does.
 _PEP440_UPPER_OPS: Final[frozenset[str]] = frozenset({"<", "<=", "==", "===", "~="})
 _PEP440_LOWER_OPS: Final[frozenset[str]] = frozenset({">", ">=", "==", "===", "~="})
-_SEMVER_UPPER_OPS: Final[frozenset[str]] = frozenset({"<", "<="})
-_SEMVER_LOWER_OPS: Final[frozenset[str]] = frozenset({">", ">=", "="})
+# node-semver spells an exact match two ways - `1.20.1` parses to the empty operator and
+# `=1.20.1` to `=` - and an exact match bounds the admitted set on *both* sides, exactly as
+# PEP 440's `==` does above. Leaving them out made a pin, the strongest support statement a
+# manifest can carry, read as an open ceiling.
+#
+# The unbounded `*`/`x`/`""` range is not in either set and must never be added: node-semver
+# gives it the operator `None` against an ANY sentinel, which is what both readers below
+# filter on to keep a wildcard unbounded in both directions.
+_SEMVER_EXACT_OPS: Final[frozenset[str]] = frozenset({"", "="})
+_SEMVER_UPPER_OPS: Final[frozenset[str]] = frozenset({"<", "<="}) | _SEMVER_EXACT_OPS
+_SEMVER_LOWER_OPS: Final[frozenset[str]] = frozenset({">", ">="}) | _SEMVER_EXACT_OPS
 
 
 @dataclass(frozen=True, slots=True)

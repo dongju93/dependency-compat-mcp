@@ -6,15 +6,27 @@ verdict type here - the outcome only says whether any material was found.
 
 Every constraint reported here comes from the release's own registry metadata, fetched for
 this request. There is no second, slower-moving tier of material and therefore no ``depth``
-field: a response either carries declared constraints or says it found none, and
+field: a response either carries comparable material or says it found none, and
 ``sources_checked`` says exactly what was read to reach that.
+
+A runtime release declares no version constraints at all, so under a constraints-only
+definition of "material" it could never be answered - the one namespace that means
+something in only one of the two tools. :class:`ReleaseLifecycle` is the second kind of
+material this tool may carry: the two facts its own publisher states about a runtime
+release, when it was published and when its line stops being supported. Reporting them is
+not a verdict, so it does not make this tool judge; it is the same "here is what the
+source says, you compare it" contract a constraint already has.
 """
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, assert_never
 
 from dependency_compat_mcp.domain.claims import (
+    EolPublished,
+    EolUnavailable,
+    EolUnpublished,
     Evidence,
     EvidenceId,
     MarkerCondition,
@@ -39,6 +51,8 @@ __all__ = [
     "ContextOutcome",
     "ContextUnknown",
     "ContextUnknownReason",
+    "ReleaseLifecycle",
+    "RuntimeEol",
     "build_context",
 ]
 
@@ -76,6 +90,31 @@ class ContextConstraint:
             )
 
 
+type RuntimeEol = EolPublished | EolUnpublished | EolUnavailable
+"""End of life as it can be reported *for a runtime release*.
+
+Three of :data:`~dependency_compat_mcp.domain.claims.EolStatus`'s four cases, not by
+loosening the distinction but by applying it one level further:
+:class:`~dependency_compat_mcp.domain.claims.EolNotApplicable` means "this target has no
+support lifecycle at all", and for such a target there is no lifecycle block to put it in.
+Admitting it here would create a state that says "a runtime is not a runtime", plus a
+summary sentence no request could ever produce.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseLifecycle:
+    """What a runtime's own publisher states about one release: when, and until when.
+
+    Carries no evidence ids. A constraint cites them because it quotes an expression that a
+    caller then compares; these two facts are the document itself, and the row in
+    ``sources_checked`` naming the index and the schedule is what they rest on.
+    """
+
+    released_at: datetime
+    eol: RuntimeEol
+
+
 @dataclass(frozen=True, slots=True)
 class ContextInput:
     """Everything the assembler may see. Referential integrity is checked on construction.
@@ -87,6 +126,7 @@ class ContextInput:
     target: Target
     release_found: bool
     constraints: tuple[ContextConstraint, ...]
+    lifecycle: ReleaseLifecycle | None
     evidence: tuple[Evidence, ...]
     lookups: tuple[SourceCheck, ...]
     marker_guarded: bool
@@ -116,15 +156,25 @@ class ContextInput:
 
 @dataclass(frozen=True, slots=True)
 class ContextAvailable:
-    """At least one declared constraint was found."""
+    """At least one piece of comparable material was found.
+
+    The "an available context is never empty" invariant is unchanged; only what counts as
+    material is wider than it was. A registry release brings constraints and a runtime
+    release brings a lifecycle, so in practice exactly one of the two fields is populated -
+    but the check is on emptiness rather than on the target's kind, because it is emptiness
+    that would make ``available`` a lie.
+    """
 
     constraints: tuple[ContextConstraint, ...]
+    lifecycle: ReleaseLifecycle | None
     notices: tuple[Notice, ...]
     limitations: tuple[Limitation, ...]
 
     def __post_init__(self) -> None:
-        if not self.constraints:
-            raise InvariantViolation("an available context must carry a constraint")
+        if not self.constraints and self.lifecycle is None:
+            raise InvariantViolation(
+                "an available context must carry a constraint or a lifecycle"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,11 +240,12 @@ def build_context(context: ContextInput) -> ContextOutcome:
     if not context.release_found:
         return _unknown("release_not_found", notices, limitations)
 
-    if not context.constraints:
+    if not context.constraints and context.lifecycle is None:
         return _unknown("evidence_not_found", notices, limitations)
 
     return ContextAvailable(
         constraints=context.constraints,
+        lifecycle=context.lifecycle,
         notices=sorted_notices(notices),
         limitations=sorted_limitations(limitations),
     )

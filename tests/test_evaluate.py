@@ -494,13 +494,19 @@ def test_eol_after_the_declaring_release_does_not_fire() -> None:
 
 
 def test_unknown_release_dates_leave_an_open_ceiling_unknown() -> None:
+    """A missing date is its own cause, never the ordering claim it could not make.
+
+    `open_upper_bound` says the counterpart shipped after the declaration - a fact read
+    from two publication dates. With one of them missing nothing was ordered, so the
+    result must name the absence instead of asserting an order it never established.
+    """
     verdict = evaluate(
         evaluation(gate(">=3.10"), release_facts=facts(declaring_released_at=None))
     )
     assert isinstance(verdict, Unknown)
     assert verdict.reason == "insufficient_evidence"
     assert verdict.causes == (
-        UnprovenClaim(kind="open_upper_bound", evidence_ids=("ev-gate",)),
+        UnprovenClaim(kind="release_order_unavailable", evidence_ids=("ev-gate",)),
     )
     assert codes(verdict) == ()
 
@@ -1094,6 +1100,6 @@ def test_missing_release_dates_outrank_an_unreadable_lifecycle() -> None:
     assert isinstance(verdict, Unknown)
     assert verdict.reason == "insufficient_evidence"
     assert verdict.causes == (
-        UnprovenClaim(kind="open_upper_bound", evidence_ids=("ev-gate",)),
+        UnprovenClaim(kind="release_order_unavailable", evidence_ids=("ev-gate",)),
     )
     assert codes(verdict) == ("source_unavailable",)

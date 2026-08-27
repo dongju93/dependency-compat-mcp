@@ -65,8 +65,10 @@ from dependency_compat_mcp.domain.claims import (
     CompatibilityStatement,
     Corroboration,
     EolNotApplicable,
+    EolPublished,
     EolStatus,
     EolUnavailable,
+    EolUnpublished,
     Evidence,
     EvidenceId,
     InstallationGate,
@@ -80,6 +82,8 @@ from dependency_compat_mcp.domain.claims import (
 from dependency_compat_mcp.domain.context import (
     ContextConstraint,
     ContextInput,
+    ReleaseLifecycle,
+    RuntimeEol,
     build_context,
 )
 from dependency_compat_mcp.domain.errors import InvariantViolation
@@ -138,6 +142,28 @@ class _Collected:
     yanked: YankedInfo | None
     found: bool
     checks: tuple[SourceCheck, ...]
+
+
+@dataclass(slots=True)
+class _RuntimeProgress:
+    """The runtime release index, held from the moment it answers until the call ends.
+
+    A runtime side reads two documents concurrently and only one of them is required. If
+    the call-level budget expires while the *optional* schedule is still in flight, the
+    index has already answered and its answer is already a fact the request paid for.
+    Letting it die with the cancelled task would report the *required* lookup as ``failed``
+    and produce ``unknown / lookup_failed`` about a release whose existence and publication
+    date the server had in fact confirmed - the one outcome the optional/required split
+    exists to prevent.
+
+    A mutable cell rather than a return value, because after cancellation there is no
+    return value left to read. Written only where a lifecycle lookup was actually opened,
+    so a set ``index`` *means* "the required document answered and only the optional
+    schedule was outstanding" - the timeout path cannot then name a source that was never
+    opened.
+    """
+
+    index: RuntimeIndexLookup | None = None
 
 
 @dataclass
@@ -273,8 +299,16 @@ class CompatibilityService:
     async def get_compatibility_context(
         self, target: Target
     ) -> GetCompatibilityContextResult:
-        """Return comparison material for one release. This tool never judges."""
-        side = await self._collect_one_with_budget(target, role="declaring")
+        """Return comparison material for one release. This tool never judges.
+
+        A runtime target reaches this with nothing to declare - the release indexes carry
+        no version constraints - so the material it contributes is the pair of facts its
+        publisher does state, assembled by :func:`_lifecycle_of`. That is why the support
+        schedule is fetched here as well as on the verdict path.
+        """
+        side = await self._collect_one_with_budget(
+            target, role="declaring", with_lifecycle=True
+        )
         checks = side.checks
 
         evidence: list[Evidence] = []
@@ -296,6 +330,7 @@ class CompatibilityService:
                 target=target,
                 release_found=side.found,
                 constraints=tuple(constraints),
+                lifecycle=_lifecycle_of(target, side),
                 evidence=tuple(evidence),
                 lookups=checks,
                 marker_guarded=marker_guarded,
@@ -325,20 +360,34 @@ class CompatibilityService:
         """
         declaring_task: asyncio.Task[_Collected] | None = None
         declared_task: asyncio.Task[_Collected] | None = None
+        declaring_progress = _RuntimeProgress()
+        declared_progress = _RuntimeProgress()
         try:
             async with asyncio.timeout(self.request_budget_seconds):
                 async with asyncio.TaskGroup() as group:
                     declaring_task = group.create_task(
-                        self._collect_one(declaring, role="declaring")
+                        self._collect_one(
+                            declaring,
+                            role="declaring",
+                            with_lifecycle=False,
+                            progress=declaring_progress,
+                        )
                     )
                     declared_task = group.create_task(
-                        self._collect_one(declared_about, role="declared_about")
+                        self._collect_one(
+                            declared_about,
+                            role="declared_about",
+                            with_lifecycle=True,
+                            progress=declared_progress,
+                        )
                     )
         except TimeoutError:
             return (
-                self._completed_or_timeout(declaring_task, declaring, "declaring"),
                 self._completed_or_timeout(
-                    declared_task, declared_about, "declared_about"
+                    declaring_task, declaring, "declaring", declaring_progress
+                ),
+                self._completed_or_timeout(
+                    declared_task, declared_about, "declared_about", declared_progress
                 ),
             )
         if declaring_task is None or declared_task is None:  # pragma: no cover
@@ -346,35 +395,63 @@ class CompatibilityService:
         return declaring_task.result(), declared_task.result()
 
     async def _collect_one_with_budget(
-        self, target: Target, *, role: LookupRole
+        self, target: Target, *, role: LookupRole, with_lifecycle: bool
     ) -> _Collected:
         """Collect one target without letting it outlive the request budget."""
+        progress = _RuntimeProgress()
         try:
             async with asyncio.timeout(self.request_budget_seconds):
-                return await self._collect_one(target, role=role)
+                return await self._collect_one(
+                    target,
+                    role=role,
+                    with_lifecycle=with_lifecycle,
+                    progress=progress,
+                )
         except TimeoutError:
-            return self._timed_out(target, role)
+            return self._timed_out(target, role, progress)
 
     def _completed_or_timeout(
-        self, task: asyncio.Task[_Collected] | None, target: Target, role: LookupRole
+        self,
+        task: asyncio.Task[_Collected] | None,
+        target: Target,
+        role: LookupRole,
+        progress: _RuntimeProgress,
     ) -> _Collected:
         if task is not None and task.done() and not task.cancelled():
             return task.result()
-        return self._timed_out(target, role)
+        return self._timed_out(target, role, progress)
 
-    def _timed_out(self, target: Target, role: LookupRole) -> _Collected:
-        """Represent an exhausted call-level budget as a required lookup failure.
+    def _timed_out(
+        self, target: Target, role: LookupRole, progress: _RuntimeProgress
+    ) -> _Collected:
+        """Represent an exhausted call-level budget as a lookup failure.
 
-        Only the required source is reported. Which of a runtime's two documents was still
-        in flight when the budget ran out is not knowable here, and the optional one is not
-        what decided the outcome: one failed required lookup already means
-        ``lookup_failed``, and naming a second source the server cannot prove it opened
-        would put an invented row in ``sources_checked``.
+        A recorded index in ``progress`` settles which lookup the budget actually stopped:
+        the required document had answered and only the optional schedule was outstanding.
+        That is an optional failure, and it is reported as exactly the answer the server
+        would have given had the schedule failed for any other reason - the release fact
+        the index established, plus a non-required ``timeout`` row and the
+        ``EolUnavailable`` that stops step 5 from calling an open-ended gate ``supported``.
+        Reporting a required failure there would throw away a confirmed release date, or a
+        confirmed *missing* release, that had already been read from an official source.
+
+        With no recorded index, only the required source is reported. Which document was
+        still in flight is not knowable here, and the optional one is not what decided the
+        outcome: one failed required lookup already means ``lookup_failed``, and naming a
+        second source the server cannot prove it opened would put an invented row in
+        ``sources_checked``.
         """
         match target:
             case PyPITarget() | NpmTarget():
                 source = self._adapter_for(target).source_id
             case PythonRuntimeTarget() | NodeRuntimeTarget():
+                if progress.index is not None:
+                    return _runtime_collected(
+                        target,
+                        index=progress.index,
+                        lifecycle=RuntimeSourceFailed(detail="timeout"),
+                        role=role,
+                    )
                 source = index_source_id(target)
             case _:
                 assert_never(target)
@@ -396,57 +473,70 @@ class CompatibilityService:
             ),
         )
 
-    async def _collect_one(self, target: Target, *, role: LookupRole) -> _Collected:
+    async def _collect_one(
+        self,
+        target: Target,
+        *,
+        role: LookupRole,
+        with_lifecycle: bool,
+        progress: _RuntimeProgress,
+    ) -> _Collected:
         match target:
             case PythonRuntimeTarget() | NodeRuntimeTarget():
-                return await self._collect_runtime(target, role=role)
+                return await self._collect_runtime(
+                    target,
+                    role=role,
+                    with_lifecycle=with_lifecycle,
+                    progress=progress,
+                )
             case PyPITarget() | NpmTarget():
+                # A registry release is one document and one required lookup, so there is
+                # no partial answer a timeout could discard.
                 return await self._collect_registry(target, role=role)
             case _:
                 assert_never(target)
 
-    async def _collect_runtime(self, target: Target, *, role: LookupRole) -> _Collected:
+    async def _collect_runtime(
+        self,
+        target: Target,
+        *,
+        role: LookupRole,
+        with_lifecycle: bool,
+        progress: _RuntimeProgress,
+    ) -> _Collected:
         """Read a runtime release from its official index, and its line's end of life.
 
-        The support schedule is only consulted for the side the declaration is *about*:
-        the end-of-life fact exists to bound an open-ended gate declared by the other
-        side, and ``get_compatibility_context`` reports declarations rather than judging
-        them. Fetching it anywhere else would put a row in ``sources_checked`` for a
-        document nothing in the response rests on.
+        The support schedule is consulted only where the response will rest on it, so that
+        ``sources_checked`` never names a document nothing was read from. There are exactly
+        two such places, and the caller says which one this is rather than the role being
+        read as a proxy for it: the side a declaration is *about*, whose open-ended gate
+        the end-of-life fact bounds, and ``get_compatibility_context``, which reports the
+        date as a fact about the release itself. The context tool passes ``declaring`` for
+        its single target, so ``role`` could not have told the two apart.
         """
-        if role == "declared_about":
+        if with_lifecycle:
             # Structured: both documents are fetched under one scope, and a failure in one
             # cancels the other rather than leaving it running past the response.
+            #
+            # The required index is awaited in the group's own body while only the optional
+            # schedule runs as a child task, so the split between them is in the shape of
+            # the code rather than in a comment about it. It is also what makes the index
+            # recoverable: `progress` is written the instant the index answers, which is
+            # before the group begins waiting on the schedule, so a budget that expires
+            # during that wait no longer takes the index down with it.
             async with asyncio.TaskGroup() as group:
-                index_task = group.create_task(self._runtime_index(target))
                 lifecycle_task = group.create_task(self._runtime_lifecycle(target))
-            index = index_task.result()
+                index = await self._runtime_index(target)
+                progress.index = index
             lifecycle: RuntimeLifecycleLookup | None = lifecycle_task.result()
         else:
+            # Nothing to record: with no sibling to wait for, this returns as soon as the
+            # index answers, and a `progress` written here could only invent a schedule row
+            # for a document this call never opened.
             index = await self._runtime_index(target)
             lifecycle = None
 
-        release = select_release(index, target)
-        checks = [index_check(target, release, role=role)]
-        if lifecycle is not None:
-            checks.append(lifecycle_check(target, lifecycle, role=role))
-
-        match release:
-            case RuntimeReleaseFound(released_at=released_at):
-                released, found = released_at, True
-            case RuntimeReleaseAbsent() | RuntimeReleaseUnavailable():
-                released, found = None, False
-            case _:
-                assert_never(release)
-
-        return _Collected(
-            document=None,
-            released_at=released,
-            eol=select_eol(lifecycle, target),
-            yanked=None,
-            found=found,
-            checks=tuple(checks),
-        )
+        return _runtime_collected(target, index=index, lifecycle=lifecycle, role=role)
 
     async def _runtime_index(self, target: Target) -> RuntimeIndexLookup:
         return await self._cached_document(
@@ -585,6 +675,95 @@ class CompatibilityService:
         """
         if self.fetcher is not None:
             await self.fetcher.aclose()
+
+
+def _runtime_collected(
+    target: Target,
+    *,
+    index: RuntimeIndexLookup,
+    lifecycle: RuntimeLifecycleLookup | None,
+    role: LookupRole,
+) -> _Collected:
+    """Turn a runtime's fetched documents into one side's contribution. Pure and total.
+
+    Both the completed path and the budget-expiry path assemble their answer here, so a
+    row in ``sources_checked`` cannot describe a different lookup from the one the verdict
+    was computed from, whichever path produced it.
+
+    ``lifecycle`` is ``None`` only where no schedule lookup was made at all, which
+    :func:`~dependency_compat_mcp.adapters.runtimes.select_eol` reports as
+    ``EolNotApplicable`` - distinct from a schedule that was asked for and could not be
+    read, which must remain able to block a decided verdict.
+    """
+    release = select_release(index, target)
+    checks = [index_check(target, release, role=role)]
+    if lifecycle is not None:
+        checks.append(lifecycle_check(target, lifecycle, role=role))
+
+    match release:
+        case RuntimeReleaseFound(released_at=released_at):
+            released, found = released_at, True
+        case RuntimeReleaseAbsent() | RuntimeReleaseUnavailable():
+            released, found = None, False
+        case _:
+            assert_never(release)
+
+    return _Collected(
+        document=None,
+        released_at=released,
+        eol=select_eol(lifecycle, target),
+        yanked=None,
+        found=found,
+        checks=tuple(checks),
+    )
+
+
+def _runtime_eol(eol: EolStatus) -> RuntimeEol:
+    """Narrow a collected status to the three cases a runtime release can be in.
+
+    ``EolNotApplicable`` means "this target has no support lifecycle", which is true of a
+    registry package and of nothing else. Reaching it here would mean the caller built a
+    lifecycle for a package, so it raises for the same reason
+    :func:`~dependency_compat_mcp.adapters.runtimes.runtime_of` does: a defect surfaces as
+    a tool error rather than being smuggled into a response as a fourth status.
+    """
+    match eol:
+        case EolPublished() | EolUnpublished() | EolUnavailable():
+            return eol
+        case EolNotApplicable():
+            raise InvariantViolation(
+                "a registry release has no support lifecycle to report"
+            )
+        case _:
+            assert_never(eol)
+
+
+def _lifecycle_of(target: Target, side: _Collected) -> ReleaseLifecycle | None:
+    """The lifecycle block ``get_compatibility_context`` reports, if the target has one.
+
+    ``None`` in the two cases where there is nothing to state rather than something
+    unknown: a registry release, which has no support lifecycle at all, and a runtime
+    release the index does not list or could not be read for - both of which
+    :func:`~dependency_compat_mcp.domain.context.build_context` already answers as
+    ``release_not_found`` or ``lookup_failed``, from the same lookups.
+    """
+    match target:
+        case PyPITarget() | NpmTarget():
+            return None
+        case PythonRuntimeTarget() | NodeRuntimeTarget():
+            if not side.found:
+                return None
+            if (
+                side.released_at is None
+            ):  # pragma: no cover - a found release has a date
+                raise InvariantViolation(
+                    "a runtime release found in the official index must carry its date"
+                )
+            return ReleaseLifecycle(
+                released_at=side.released_at, eol=_runtime_eol(side.eol)
+            )
+        case _:
+            assert_never(target)
 
 
 def _claim_to_constraint(

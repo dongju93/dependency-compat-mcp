@@ -29,13 +29,19 @@ from dependency_compat_mcp.contracts.outputs import (
     ContextUnknownResult,
     DecidedMarkerOut,
     DecisionCauseOut,
+    EolOut,
+    EolPublishedOut,
+    EolUnavailableOut,
+    EolUnpublishedOut,
     EvidenceOut,
     FetchedProvenanceOut,
     GetCompatibilityContextResult,
+    LifecycleOut,
     LimitationOut,
     MarkerGuardOut,
     NarrativeEvidenceOut,
     NoticeOut,
+    OpenUpperBoundOut,
     RelationOut,
     ResolvedRelationOut,
     SourceCheckOut,
@@ -50,6 +56,9 @@ from dependency_compat_mcp.contracts.outputs import (
     VersionConstraintEvidenceOut,
 )
 from dependency_compat_mcp.domain.claims import (
+    EolPublished,
+    EolUnavailable,
+    EolUnpublished,
     Evidence,
     EvidenceId,
     Fetched,
@@ -58,6 +67,7 @@ from dependency_compat_mcp.domain.claims import (
     SourceCheck,
     VersionConstraintEvidence,
     evidence_sort_key,
+    official_day,
     source_check_sort_key,
 )
 from dependency_compat_mcp.domain.context import (
@@ -65,6 +75,8 @@ from dependency_compat_mcp.domain.context import (
     ContextConstraint,
     ContextOutcome,
     ContextUnknown,
+    ReleaseLifecycle,
+    RuntimeEol,
 )
 from dependency_compat_mcp.domain.diagnostics import (
     ConditionalClaim,
@@ -258,7 +270,25 @@ def _causes_out(
                     )
                 )
             case UnprovenClaim(kind=kind):
-                out.append(UnprovenClaimOut(kind=kind, evidence_ids=public_ids))
+                match kind:
+                    case "open_upper_bound":
+                        out.append(
+                            OpenUpperBoundOut(
+                                evidence_ids=public_ids,
+                                next_actions=("check_newer_declaring_release",),
+                            )
+                        )
+                    case (
+                        "release_order_unavailable"
+                        | "stale_lower_bound"
+                        | "lifecycle_unavailable"
+                        | "tier_c_only"
+                        | "claim_outside_range"
+                        | "uncomparable_claim"
+                    ):
+                        out.append(UnprovenClaimOut(kind=kind, evidence_ids=public_ids))
+                    case never:
+                        assert_never(never)
             case _:
                 assert_never(cause)
     return tuple(out)
@@ -363,6 +393,25 @@ def _constraint_out(
     )
 
 
+def _eol_out(eol: RuntimeEol) -> EolOut:
+    match eol:
+        case EolPublished(at=at):
+            return EolPublishedOut(at=official_day(at))
+        case EolUnpublished():
+            return EolUnpublishedOut()
+        case EolUnavailable(detail=detail):
+            return EolUnavailableOut(detail=detail)
+        case _:
+            assert_never(eol)
+
+
+def _lifecycle_out(lifecycle: ReleaseLifecycle) -> LifecycleOut:
+    return LifecycleOut(
+        released_at=official_day(lifecycle.released_at),
+        end_of_life=_eol_out(lifecycle.eol),
+    )
+
+
 def build_context_result(
     *,
     target: Target,
@@ -373,14 +422,17 @@ def build_context_result(
 ) -> GetCompatibilityContextResult:
     """Assemble a ``get_compatibility_context`` response from domain values.
 
-    ``ContextUnknown`` has no ``constraints`` field at all - that is the point of the sum
-    type - so it is read only inside the branch where it exists. Reading it up front would
-    have made the "no material at all" path the one that crashes.
+    ``ContextUnknown`` has no ``constraints`` or ``lifecycle`` field at all - that is the
+    point of the sum type - so they are read only inside the branch where they exist.
+    Reading them up front would have made the "no material at all" path the one that
+    crashes.
     """
     constraints: tuple[ContextConstraint, ...] = ()
+    lifecycle: ReleaseLifecycle | None = None
     match outcome:
         case ContextAvailable():
             constraints = outcome.constraints
+            lifecycle = outcome.lifecycle
         case ContextUnknown():
             pass
         case _:
@@ -399,6 +451,7 @@ def build_context_result(
         "constraints": tuple(
             _constraint_out(constraint, mapping) for constraint in constraints
         ),
+        "lifecycle": None if lifecycle is None else _lifecycle_out(lifecycle),
         "notices": _notices_out(outcome.notices, mapping),
         "limitations": _limitations_out(outcome.limitations),
         "sources_checked": _sources_out(sources),

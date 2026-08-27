@@ -190,10 +190,63 @@ def test_a_version_missing_from_a_readable_index_is_absent_not_failed() -> None:
 
     found = select_release(_index(target, payloads), target)
 
-    assert found == RuntimeReleaseAbsent(target=target)
+    assert found == RuntimeReleaseAbsent(target=target, line_exists=True)
     check = index_check(target, found, role="declared_about")
     assert (check.outcome, check.required) == ("not_found", True)
-    assert check.detail is None
+    assert check.detail == "line_exists"
+
+
+def test_an_absent_release_reports_whether_its_line_is_listed_at_all() -> None:
+    """A missing patch and a missing line are both `not_found`, told apart by `detail`.
+
+    Both rest on the same read index, so reporting the difference asserts nothing the
+    document did not say - which is why it rides on `detail` rather than moving the
+    verdict.
+    """
+    payloads = {
+        PYTHON_RELEASE_INDEX_URL: python_release_index({"3.13.0": "2024-10-07"})
+    }
+    absent_line = _python("3.99.0")
+
+    found = select_release(_index(absent_line, payloads), absent_line)
+
+    assert found == RuntimeReleaseAbsent(target=absent_line, line_exists=False)
+    assert (
+        index_check(absent_line, found, role="declared_about").detail == "line_absent"
+    )
+
+
+def test_a_python_line_prefix_does_not_match_a_longer_minor() -> None:
+    """`3.1` and `3.10` are different lines; a prefix without its dot would merge them."""
+    target = _python("3.1.99")
+    payloads = {
+        PYTHON_RELEASE_INDEX_URL: python_release_index({"3.10.0": "2021-10-04"})
+    }
+
+    found = select_release(_index(target, payloads), target)
+
+    assert found == RuntimeReleaseAbsent(target=target, line_exists=False)
+
+
+@pytest.mark.parametrize(
+    ("version", "listed", "line_exists"),
+    [
+        ("22.99.0", {"22.11.0": "2024-10-29"}, True),
+        ("99.0.0", {"22.11.0": "2024-10-29"}, False),
+        # nodejs keys the 0.x era per minor, so 0.12 is not the same line as 0.10.
+        ("0.10.99", {"0.10.48": "2016-10-18"}, True),
+        ("0.12.99", {"0.10.48": "2016-10-18"}, False),
+    ],
+)
+def test_node_lines_follow_the_index_spelling(
+    version: str, listed: dict[str, str], line_exists: bool
+) -> None:
+    target = _node(version)
+    payloads = {NODE_RELEASE_INDEX_URL: node_release_index(listed)}
+
+    found = select_release(_index(target, payloads), target)
+
+    assert found == RuntimeReleaseAbsent(target=target, line_exists=line_exists)
 
 
 # --------------------------------------------------------------------------------------

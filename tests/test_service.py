@@ -48,6 +48,32 @@ class SlowFetcher(FakeFetcher):
         raise AssertionError("the request budget did not cancel the registry lookup")
 
 
+class StallingFetcher(FakeFetcher):
+    """Hangs on the named URLs and answers every other one at once.
+
+    :class:`SlowFetcher` stalls the whole request, so every lookup is unfinished when the
+    budget expires. This one stalls a single document, which is the case where the server
+    holds a completed answer it must not throw away with the cancelled task.
+    """
+
+    def __init__(self, stalled: set[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.stalled = stalled
+        self.cancelled = 0
+
+    @override
+    async def get_json(self, url: str) -> HttpResult:
+        if url not in self.stalled:
+            return await super().get_json(url)
+        self.calls.append(url)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        raise AssertionError("the request budget did not cancel the stalled lookup")
+
+
 def _check(
     service: CompatibilityService,
     subject: tuple[str, str, str],
@@ -158,6 +184,7 @@ def test_an_open_ceiling_on_a_later_runtime_is_unknown_not_supported() -> None:
                 "example-pkg",
                 "1.0",
                 requires_python=">=3.10",
+                classifiers=["Programming Language :: Python :: 3.12"],
                 uploaded="2023-01-01T00:00:00.000000Z",
             )
         }
@@ -173,8 +200,16 @@ def test_an_open_ceiling_on_a_later_runtime_is_unknown_not_supported() -> None:
     assert _kinds(result) == ["open_upper_bound"]
     # The cause cites the gate itself, so the caller can read the open range it names.
     assert result["decision_causes"][0]["evidence_ids"] == ["evidence-1"]
+    assert result["decision_causes"][0]["next_actions"] == [
+        "check_newer_declaring_release"
+    ]
     # The gate is still returned: "it installs" is exactly the fact the caller needs.
     assert any(e.get("expression") == ">=3.10" for e in result["evidence"])
+    classifier = next(
+        e for e in result["evidence"] if e["source_type"] == "registry_classifier"
+    )
+    # A missing 3.13 classifier is not negative evidence and must not become causal.
+    assert classifier["id"] not in result["decision_causes"][0]["evidence_ids"]
     assert "verdict_evidence_ids" not in result
 
 
@@ -394,6 +429,12 @@ def test_a_large_npm_package_uses_its_exact_version_manifest() -> None:
 
 
 def test_an_open_npm_dependency_without_release_times_stays_unknown() -> None:
+    """The exact-version manifest carries no publication date, so nothing can be ordered.
+
+    The cause has to say that rather than claim the counterpart shipped later: npm never
+    reports a release date, so the ordering the `open_upper_bound` sentence asserts is one
+    this server can never have read on an npm pair.
+    """
     fetcher = FakeFetcher(
         payloads={
             npm_url("app", "1.0.0"): npm_manifest(
@@ -410,7 +451,34 @@ def test_an_open_npm_dependency_without_release_times_stays_unknown() -> None:
 
     assert result["verdict"] == "unknown"
     assert result["reason"] == "insufficient_evidence"
-    assert _kinds(result) == ["open_upper_bound"]
+    assert _kinds(result) == ["release_order_unavailable"]
+    # No `next_actions`: re-asking about a newer declaring release returns this same cause.
+    assert "next_actions" not in result["decision_causes"][0]
+    assert "was released after it" not in result["summary"]
+
+
+def test_an_exactly_pinned_npm_dependency_is_supported() -> None:
+    """An exact pin closes the range on both sides, so no date is needed to decide it.
+
+    node-semver spells a bare pin with the empty operator, which is why this reached the
+    open-ceiling branch at all. A pin is the strongest statement a manifest can make about
+    a counterpart, and reading it as an open ceiling turned it into a permanent unknown.
+    """
+    fetcher = FakeFetcher(
+        payloads={
+            npm_url("app", "1.0.0"): npm_manifest(
+                "app", "1.0.0", dependencies={"library": "2.1.0"}
+            ),
+            npm_url("library", "2.1.0"): npm_manifest("library", "2.1.0"),
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("npm", "app", "1.0.0"),
+        ("npm", "library", "2.1.0"),
+    )
+
+    assert result["verdict"] == "supported"
 
 
 # --------------------------------------------------------------------------------------
@@ -450,18 +518,86 @@ def test_a_context_lookup_failure_is_a_normal_unknown() -> None:
     assert result["evidence"] == []
 
 
-def test_a_runtime_context_reads_the_release_index_but_not_the_schedule() -> None:
-    """The support schedule bounds someone else's declaration; this tool declares nothing."""
+def test_a_runtime_context_reports_its_release_date_and_end_of_life() -> None:
+    """A runtime declares nothing, so its own publisher's two facts are the material.
+
+    Both official documents are read here, unlike on the verdict path's declaring side:
+    the end-of-life date is what the response rests on rather than something bounding
+    someone else's gate, so `sources_checked` names the schedule it came from.
+    """
     fetcher = FakeFetcher()
+    result = _context(build_service(fetcher), ("runtime", "python", "3.8.0"))
+
+    assert result["availability"] == "available"
+    assert result["constraints"] == []
+    assert result["lifecycle"] == {
+        "released_at": "2019-10-14",
+        "end_of_life": {"status": "published", "at": "2024-10-07"},
+    }
+    assert PYTHON_RELEASE_CYCLE_URL in fetcher.calls
+    assert {check["source"] for check in result["sources_checked"]} == {
+        "python_release_index",
+        "python_release_cycle",
+    }
+
+
+def test_a_month_precision_end_of_life_is_reported_as_unpublished() -> None:
+    """Upstream states `2029-10` for a line still in support; a day is not invented."""
+    result = _context(build_service(FakeFetcher()), ("runtime", "python", "3.13.0"))
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"]["end_of_life"] == {"status": "unpublished"}
+
+
+def test_an_unreadable_schedule_narrows_a_runtime_context_without_withdrawing_it() -> (
+    None
+):
+    """The index is required and the schedule is not, on this path too."""
+    fetcher = FakeFetcher(failures={PYTHON_RELEASE_CYCLE_URL: "timeout"})
     result = _context(build_service(fetcher), ("runtime", "python", "3.13.0"))
 
-    assert result["availability"] == "unknown"
-    assert result["reason"] == "evidence_not_found"
-    assert _outcome(result, "python_release_index") == "ok"
-    assert PYTHON_RELEASE_CYCLE_URL not in fetcher.calls
-    assert {check["source"] for check in result["sources_checked"]} == {
-        "python_release_index"
+    assert result["availability"] == "available"
+    assert result["lifecycle"]["released_at"] == "2024-10-07"
+    assert result["lifecycle"]["end_of_life"] == {
+        "status": "unavailable",
+        "detail": "timeout",
     }
+    assert _codes(result, "limitations") == ["source_unavailable"]
+
+
+def test_a_node_context_answers_from_its_own_two_documents() -> None:
+    """Same shape for the other runtime: neither namespace is answerable in one tool only."""
+    result = _context(build_service(FakeFetcher()), ("runtime", "node", "22.17.0"))
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"] == {
+        "released_at": "2025-06-24",
+        "end_of_life": {"status": "published", "at": "2027-04-30"},
+    }
+
+
+def test_a_runtime_release_the_index_does_not_list_has_no_lifecycle() -> None:
+    """`release_not_found` still outranks everything; a lifecycle cannot assert existence."""
+    result = _context(build_service(FakeFetcher()), ("runtime", "python", "3.13.99"))
+
+    assert result["availability"] == "unknown"
+    assert result["reason"] == "release_not_found"
+    assert result["lifecycle"] is None
+
+
+def test_a_registry_context_carries_no_lifecycle() -> None:
+    """A PyPI release has no support schedule, and `null` says so without a fourth status."""
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "Django", "5.2", requires_python=">=3.10"
+            )
+        }
+    )
+    result = _context(build_service(fetcher), ("pypi", "django", "5.2"))
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"] is None
 
 
 def test_context_collection_obeys_the_call_level_budget() -> None:
@@ -994,3 +1130,106 @@ def test_the_budget_cancels_both_runtime_documents_together() -> None:
     assert _outcome(result, "python_release_index") == "failed"
     # The registry lookup plus both official runtime documents.
     assert fetcher.cancelled == 3
+
+
+def test_a_stalled_schedule_does_not_withdraw_the_release_the_index_confirmed() -> None:
+    """A budget spent on the optional document is an optional failure, not a required one.
+
+    The release index answered; only the support schedule was still in flight when the
+    budget expired. Reporting the index as ``failed`` would answer ``lookup_failed`` about
+    a release whose existence and date the server had already read from python.org.
+    """
+    fetcher = StallingFetcher(
+        {PYTHON_RELEASE_CYCLE_URL},
+        payloads={
+            pypi_url("django", "5.2"): pypi_release(
+                "Django", "5.2", requires_python=">=3.10"
+            )
+        },
+    )
+    result = _check(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("pypi", "django", "5.2"),
+        ("runtime", "python", "3.12.0"),
+    )
+
+    # The same answer an unreadable schedule produces for any other reason.
+    assert result["verdict"] == "unknown"
+    assert result["reason"] == "insufficient_evidence"
+    assert [cause["kind"] for cause in result["decision_causes"]] == [
+        "lifecycle_unavailable"
+    ]
+    assert "source_unavailable" in _codes(result, "limitations")
+    assert _outcome(result, "python_release_index") == "ok"
+    schedule = _row(result, "python_release_cycle")
+    assert (schedule["outcome"], schedule["required"], schedule["detail"]) == (
+        "failed",
+        False,
+        "timeout",
+    )
+    assert fetcher.cancelled == 1
+
+
+def test_a_stalled_schedule_does_not_withdraw_a_confirmed_missing_release() -> None:
+    """The other fact the index settles survives the same way.
+
+    ``3.13.99`` was read and is not listed. That is ``release_not_found`` - a claim about
+    a document that was read - and it must not decay into ``lookup_failed``.
+    """
+    fetcher = StallingFetcher(
+        {PYTHON_RELEASE_CYCLE_URL},
+        payloads={
+            pypi_url("app", "1.0"): pypi_release("app", "1.0", requires_python=">=3.10")
+        },
+    )
+    result = _check(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.13.99"),
+    )
+
+    assert result["reason"] == "release_not_found"
+    assert _row(result, "python_release_index")["outcome"] == "not_found"
+
+
+def test_a_stalled_schedule_narrows_a_runtime_context_without_withdrawing_it() -> None:
+    """The context tool reads the schedule too, and loses no more than the schedule."""
+    fetcher = StallingFetcher({PYTHON_RELEASE_CYCLE_URL})
+    result = _context(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("runtime", "python", "3.13.0"),
+    )
+
+    assert result["availability"] == "available"
+    assert result["lifecycle"]["released_at"] == "2024-10-07"
+    assert result["lifecycle"]["end_of_life"] == {
+        "status": "unavailable",
+        "detail": "timeout",
+    }
+    assert _codes(result, "limitations") == ["source_unavailable"]
+
+
+def test_a_stalled_release_index_is_still_a_required_failure() -> None:
+    """The asymmetry holds in the other direction: the required document decides.
+
+    The schedule answering first buys nothing - without the index the server cannot say
+    whether the release exists, and only the source it can prove it opened is reported.
+    """
+    fetcher = StallingFetcher(
+        {PYTHON_RELEASE_INDEX_URL},
+        payloads={
+            pypi_url("app", "1.0"): pypi_release("app", "1.0", requires_python=">=3.10")
+        },
+    )
+    result = _check(
+        build_service(fetcher, request_budget_seconds=0.05),
+        ("pypi", "app", "1.0"),
+        ("runtime", "python", "3.13.0"),
+    )
+
+    assert result["reason"] == "lookup_failed"
+    assert _outcome(result, "python_release_index") == "failed"
+    assert [check["source"] for check in result["sources_checked"]] == [
+        "pypi_json",
+        "python_release_index",
+    ]

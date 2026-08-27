@@ -143,6 +143,9 @@ def test_registry_and_runtime_targets_get_the_expected_variant() -> None:
         ("runtime", "python", ">=3.10,<3.14", "version_syntax", "version"),
         ("runtime", "python", "3.13", "runtime_patch_required", "version"),
         ("runtime", "python", "3", "runtime_patch_required", "version"),
+        # The same mistake on the other runtime, and it must not answer differently.
+        ("runtime", "node", "22", "runtime_patch_required", "version"),
+        ("runtime", "node", "22.11", "runtime_patch_required", "version"),
         ("npm", "react", ">=18", "version_syntax", "version"),
         ("npm", "react", "^19", "version_syntax", "version"),
         ("npm", "react", "1.x", "version_syntax", "version"),
@@ -169,6 +172,49 @@ def test_invalid_input_is_an_input_error_with_a_stable_code(
 
     assert caught.value.code == code
     assert caught.value.field == field
+
+
+@pytest.mark.parametrize(("name", "version"), [("python", "3.13"), ("node", "22")])
+def test_the_patch_requirement_names_the_tool_that_answers_a_line_question(
+    name: str, version: str
+) -> None:
+    """The refusal has to be actionable, or the caller only learns it asked wrongly.
+
+    A release line is the shape the question naturally arrives in - `requires_python` and
+    `engines.node` are written per line, `.python-version` and `.nvmrc` hold one - so the
+    error is where a caller finds out that `get_compatibility_context` takes it.
+
+    Both runtimes are asserted because the two versions reach the refusal by different
+    routes: `3.13` parses as PEP 440 and is rejected after, `22` is rejected before the
+    SemVer parser would call it a range.
+    """
+    with pytest.raises(InputError) as caught:
+        parse_target("runtime", name, version)
+
+    assert "get_compatibility_context" in str(caught.value)
+
+
+def test_a_node_release_line_is_not_reported_as_a_range() -> None:
+    """The old message was wrong on its face: `22` is not a range, wildcard or union.
+
+    Pinned separately from the code because a caller that reads only the prose would be
+    sent looking for a range it never wrote.
+    """
+    with pytest.raises(InputError) as caught:
+        parse_target("runtime", "node", "22")
+
+    assert "range" not in str(caught.value).lower()
+
+
+@pytest.mark.parametrize("version", ["*", ">=18", "1.x", "^19", "v22.17.0"])
+def test_node_line_detection_does_not_swallow_a_genuinely_malformed_version(
+    version: str,
+) -> None:
+    """Only the line shape is intercepted; everything else still reaches the SemVer rules."""
+    with pytest.raises(InputError) as caught:
+        parse_target("runtime", "node", version)
+
+    assert caught.value.code != "runtime_patch_required"
 
 
 @pytest.mark.parametrize(
