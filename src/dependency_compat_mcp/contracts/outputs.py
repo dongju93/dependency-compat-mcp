@@ -241,9 +241,8 @@ class UnprovenClaimOut(_Out):
 class OpenUpperBoundOut(_Out):
     """A satisfied open-ended gate that settles nothing on its own.
 
-    The declaring release predates the release asked about, or that ordering could not be
-    established because a publication timestamp was missing; either way the gate names no
-    ceiling, and asking about a later declaring release is the next exact-version question
+    The declaring release predates the release asked about and the gate names no
+    ceiling, so asking about a later declaring release is the next exact-version question
     the tool can answer. The action is part of this variant rather than an optional field
     on every cause, so an open upper bound with no path forward has no public
     representation.
