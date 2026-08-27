@@ -251,9 +251,7 @@ class OpenUpperBoundOut(_Out):
 
     kind: Literal["open_upper_bound"] = "open_upper_bound"
     evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
-    next_actions: tuple[Literal["check_newer_declaring_release"]] = (
-        "check_newer_declaring_release",
-    )
+    next_actions: tuple[Literal["check_newer_declaring_release"]]
 
 
 type DecisionCauseOut = Annotated[

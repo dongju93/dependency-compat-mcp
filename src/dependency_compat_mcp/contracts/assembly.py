@@ -272,7 +272,12 @@ def _causes_out(
             case UnprovenClaim(kind=kind):
                 match kind:
                     case "open_upper_bound":
-                        out.append(OpenUpperBoundOut(evidence_ids=public_ids))
+                        out.append(
+                            OpenUpperBoundOut(
+                                evidence_ids=public_ids,
+                                next_actions=("check_newer_declaring_release",),
+                            )
+                        )
                     case (
                         "release_order_unavailable"
                         | "stale_lower_bound"
