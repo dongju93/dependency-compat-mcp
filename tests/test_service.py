@@ -184,6 +184,7 @@ def test_an_open_ceiling_on_a_later_runtime_is_unknown_not_supported() -> None:
                 "example-pkg",
                 "1.0",
                 requires_python=">=3.10",
+                classifiers=["Programming Language :: Python :: 3.12"],
                 uploaded="2023-01-01T00:00:00.000000Z",
             )
         }
@@ -199,8 +200,16 @@ def test_an_open_ceiling_on_a_later_runtime_is_unknown_not_supported() -> None:
     assert _kinds(result) == ["open_upper_bound"]
     # The cause cites the gate itself, so the caller can read the open range it names.
     assert result["decision_causes"][0]["evidence_ids"] == ["evidence-1"]
+    assert result["decision_causes"][0]["next_actions"] == [
+        "check_newer_declaring_release"
+    ]
     # The gate is still returned: "it installs" is exactly the fact the caller needs.
     assert any(e.get("expression") == ">=3.10" for e in result["evidence"])
+    classifier = next(
+        e for e in result["evidence"] if e["source_type"] == "registry_classifier"
+    )
+    # A missing 3.13 classifier is not negative evidence and must not become causal.
+    assert classifier["id"] not in result["decision_causes"][0]["evidence_ids"]
     assert "verdict_evidence_ids" not in result
 
 
@@ -420,6 +429,12 @@ def test_a_large_npm_package_uses_its_exact_version_manifest() -> None:
 
 
 def test_an_open_npm_dependency_without_release_times_stays_unknown() -> None:
+    """The exact-version manifest carries no publication date, so nothing can be ordered.
+
+    The cause has to say that rather than claim the counterpart shipped later: npm never
+    reports a release date, so the ordering the `open_upper_bound` sentence asserts is one
+    this server can never have read on an npm pair.
+    """
     fetcher = FakeFetcher(
         payloads={
             npm_url("app", "1.0.0"): npm_manifest(
@@ -436,7 +451,34 @@ def test_an_open_npm_dependency_without_release_times_stays_unknown() -> None:
 
     assert result["verdict"] == "unknown"
     assert result["reason"] == "insufficient_evidence"
-    assert _kinds(result) == ["open_upper_bound"]
+    assert _kinds(result) == ["release_order_unavailable"]
+    # No `next_actions`: re-asking about a newer declaring release returns this same cause.
+    assert "next_actions" not in result["decision_causes"][0]
+    assert "was released after it" not in result["summary"]
+
+
+def test_an_exactly_pinned_npm_dependency_is_supported() -> None:
+    """An exact pin closes the range on both sides, so no date is needed to decide it.
+
+    node-semver spells a bare pin with the empty operator, which is why this reached the
+    open-ceiling branch at all. A pin is the strongest statement a manifest can make about
+    a counterpart, and reading it as an open ceiling turned it into a permanent unknown.
+    """
+    fetcher = FakeFetcher(
+        payloads={
+            npm_url("app", "1.0.0"): npm_manifest(
+                "app", "1.0.0", dependencies={"library": "2.1.0"}
+            ),
+            npm_url("library", "2.1.0"): npm_manifest("library", "2.1.0"),
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("npm", "app", "1.0.0"),
+        ("npm", "library", "2.1.0"),
+    )
+
+    assert result["verdict"] == "supported"
 
 
 # --------------------------------------------------------------------------------------

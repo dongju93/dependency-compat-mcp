@@ -18,7 +18,6 @@ quiet ``unknown`` (03 step 7).
 """
 
 from collections.abc import Iterable, Mapping
-from datetime import UTC, date, datetime
 from typing import assert_never
 
 from dependency_compat_mcp.contracts.outputs import (
@@ -42,6 +41,7 @@ from dependency_compat_mcp.contracts.outputs import (
     MarkerGuardOut,
     NarrativeEvidenceOut,
     NoticeOut,
+    OpenUpperBoundOut,
     RelationOut,
     ResolvedRelationOut,
     SourceCheckOut,
@@ -67,6 +67,7 @@ from dependency_compat_mcp.domain.claims import (
     SourceCheck,
     VersionConstraintEvidence,
     evidence_sort_key,
+    official_day,
     source_check_sort_key,
 )
 from dependency_compat_mcp.domain.context import (
@@ -269,7 +270,25 @@ def _causes_out(
                     )
                 )
             case UnprovenClaim(kind=kind):
-                out.append(UnprovenClaimOut(kind=kind, evidence_ids=public_ids))
+                match kind:
+                    case "open_upper_bound":
+                        out.append(
+                            OpenUpperBoundOut(
+                                evidence_ids=public_ids,
+                                next_actions=("check_newer_declaring_release",),
+                            )
+                        )
+                    case (
+                        "release_order_unavailable"
+                        | "stale_lower_bound"
+                        | "lifecycle_unavailable"
+                        | "tier_c_only"
+                        | "claim_outside_range"
+                        | "uncomparable_claim"
+                    ):
+                        out.append(UnprovenClaimOut(kind=kind, evidence_ids=public_ids))
+                    case never:
+                        assert_never(never)
             case _:
                 assert_never(cause)
     return tuple(out)
@@ -374,20 +393,10 @@ def _constraint_out(
     )
 
 
-def _official_day(moment: datetime) -> date:
-    """Narrow a comparable instant back to the day its publisher actually stated.
-
-    The runtime adapter widens a published day to midnight UTC so every date it handles
-    has one type. This is the boundary that undoes it: the response must not claim a time
-    of day that no official document announced.
-    """
-    return moment.astimezone(UTC).date()
-
-
 def _eol_out(eol: RuntimeEol) -> EolOut:
     match eol:
         case EolPublished(at=at):
-            return EolPublishedOut(at=_official_day(at))
+            return EolPublishedOut(at=official_day(at))
         case EolUnpublished():
             return EolUnpublishedOut()
         case EolUnavailable(detail=detail):
@@ -398,7 +407,7 @@ def _eol_out(eol: RuntimeEol) -> EolOut:
 
 def _lifecycle_out(lifecycle: ReleaseLifecycle) -> LifecycleOut:
     return LifecycleOut(
-        released_at=_official_day(lifecycle.released_at),
+        released_at=official_day(lifecycle.released_at),
         end_of_life=_eol_out(lifecycle.eol),
     )
 

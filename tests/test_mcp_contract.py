@@ -247,14 +247,24 @@ async def test_check_output_schema_is_the_three_variant_sum_type(
         "environment_marker",
         "extra_marker",
     ]
-    assert sorted(schema["$defs"]["UnprovenKind"]["enum"]) == [
+    assert sorted(schema["$defs"]["OtherUnprovenKind"]["enum"]) == [
         "claim_outside_range",
         "lifecycle_unavailable",
-        "open_upper_bound",
+        "release_order_unavailable",
         "stale_lower_bound",
         "tier_c_only",
         "uncomparable_claim",
     ]
+    # `release_order_unavailable` belongs to the plain variant on purpose: it is the open
+    # ceiling with no way forward, and `OpenUpperBoundOut`'s `next_actions` would tell a
+    # caller to re-ask a question that returns this same cause every time.
+    assert "release_order_unavailable" not in str(
+        schema["$defs"]["OpenUpperBoundOut"]["properties"]["kind"]
+    )
+    open_upper_bound = schema["$defs"]["OpenUpperBoundOut"]
+    next_actions = open_upper_bound["properties"]["next_actions"]
+    assert next_actions["minItems"] == next_actions["maxItems"] == 1
+    assert next_actions["prefixItems"][0]["const"] == "check_newer_declaring_release"
     assert (
         schema["$defs"]["UnprovenClaimOut"]["properties"]["evidence_ids"]["minItems"]
         == 1
