@@ -28,6 +28,7 @@ from dependency_compat_mcp.domain.claims import (
     EolPublished,
     EolUnavailable,
     EolUnpublished,
+    official_day,
 )
 from dependency_compat_mcp.domain.context import (
     ContextAvailable,
@@ -110,6 +111,13 @@ _OPEN_UPPER_BOUND: Final = (
     "{declaring}'s {rule} has no upper bound and {declared_about} was released after it, "
     "so support for it was never stated."
 )
+# The ceiling rule with the ordering fact missing. It states only what was read - an open
+# range, and no publication date to place the two releases against each other - because
+# claiming either order here would be the server asserting something it never fetched.
+_RELEASE_ORDER_UNAVAILABLE: Final = (
+    "{declaring}'s {rule} has no upper bound and no publication date was available to "
+    "order it against {declared_about}, so support for it was never stated."
+)
 _STALE_LOWER_BOUND: Final = (
     "{declared_about} had already reached end of life when {declaring} was released, "
     "so {declaring}'s {rule} never stated support for it."
@@ -138,6 +146,7 @@ _ADDITIONAL_CAUSES: Final = (
 # kind with no sentence for it is a type error here rather than a KeyError at request time.
 _UNPROVEN_TEMPLATES: Final[dict[UnprovenKind, str]] = {
     "open_upper_bound": _OPEN_UPPER_BOUND,
+    "release_order_unavailable": _RELEASE_ORDER_UNAVAILABLE,
     "stale_lower_bound": _STALE_LOWER_BOUND,
     "lifecycle_unavailable": _LIFECYCLE_UNAVAILABLE,
     "tier_c_only": _TIER_C_ONLY,
@@ -200,6 +209,7 @@ TEMPLATES: Final[tuple[str, ...]] = (
     _CONDITIONAL_ENVIRONMENT,
     _CONDITIONAL_EXTRA,
     _OPEN_UPPER_BOUND,
+    _RELEASE_ORDER_UNAVAILABLE,
     _STALE_LOWER_BOUND,
     _LIFECYCLE_UNAVAILABLE,
     _TIER_C_ONLY,
@@ -331,12 +341,11 @@ def summarise_verdict(verdict: Verdict, resolution: RelationResolution) -> str:
 def _render_day(moment: datetime) -> str:
     """Render an official date at the precision its publisher actually stated.
 
-    Both runtime documents carry day-precision dates, which the adapter widens to midnight
-    UTC so it has one comparable type. Printing the instant back would hand the caller a
-    time of day upstream never announced - the same manufactured precision the adapter
-    refuses when it declines to pad a month to a day.
+    Narrowed through :func:`~dependency_compat_mcp.domain.claims.official_day`, the same
+    inverse the wire field uses, so the sentence and the structured ``lifecycle`` value in
+    one response can never disagree about which day it was.
     """
-    return moment.strftime("%Y-%m-%d")
+    return official_day(moment).isoformat()
 
 
 def _lifecycle_summary(lifecycle: ReleaseLifecycle, rendered: str) -> str:

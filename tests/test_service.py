@@ -429,6 +429,12 @@ def test_a_large_npm_package_uses_its_exact_version_manifest() -> None:
 
 
 def test_an_open_npm_dependency_without_release_times_stays_unknown() -> None:
+    """The exact-version manifest carries no publication date, so nothing can be ordered.
+
+    The cause has to say that rather than claim the counterpart shipped later: npm never
+    reports a release date, so the ordering the `open_upper_bound` sentence asserts is one
+    this server can never have read on an npm pair.
+    """
     fetcher = FakeFetcher(
         payloads={
             npm_url("app", "1.0.0"): npm_manifest(
@@ -445,7 +451,34 @@ def test_an_open_npm_dependency_without_release_times_stays_unknown() -> None:
 
     assert result["verdict"] == "unknown"
     assert result["reason"] == "insufficient_evidence"
-    assert _kinds(result) == ["open_upper_bound"]
+    assert _kinds(result) == ["release_order_unavailable"]
+    # No `next_actions`: re-asking about a newer declaring release returns this same cause.
+    assert "next_actions" not in result["decision_causes"][0]
+    assert "was released after it" not in result["summary"]
+
+
+def test_an_exactly_pinned_npm_dependency_is_supported() -> None:
+    """An exact pin closes the range on both sides, so no date is needed to decide it.
+
+    node-semver spells a bare pin with the empty operator, which is why this reached the
+    open-ceiling branch at all. A pin is the strongest statement a manifest can make about
+    a counterpart, and reading it as an open ceiling turned it into a permanent unknown.
+    """
+    fetcher = FakeFetcher(
+        payloads={
+            npm_url("app", "1.0.0"): npm_manifest(
+                "app", "1.0.0", dependencies={"library": "2.1.0"}
+            ),
+            npm_url("library", "2.1.0"): npm_manifest("library", "2.1.0"),
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("npm", "app", "1.0.0"),
+        ("npm", "library", "2.1.0"),
+    )
+
+    assert result["verdict"] == "supported"
 
 
 # --------------------------------------------------------------------------------------

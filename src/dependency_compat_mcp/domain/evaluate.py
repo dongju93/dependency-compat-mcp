@@ -50,6 +50,7 @@ from dependency_compat_mcp.domain.diagnostics import (
     LimitationCode,
     Notice,
     UnprovenClaim,
+    UnprovenKind,
     guard_of,
     sorted_causes,
     sorted_limitations,
@@ -609,9 +610,19 @@ def _step_five(
         return _supported(gates, notices, limitations)
 
     match _declared_about_release_order(facts):
-        case "newer" | "unavailable":
+        case "newer" | "unavailable" as order:
             if corroborating:
                 return _supported(gates + corroborating, notices, limitations)
+            # Both states leave an open-ended gate unproven, but they are not the same
+            # finding and must not share a cause. `newer` is a fact the server read: the
+            # counterpart shipped after the declaration, so a later declaring release is a
+            # question that could answer differently. `unavailable` is the absence of that
+            # fact - a publication date was missing, nothing was ordered, and re-asking
+            # about a newer release would return this same cause forever. Reporting them
+            # as one would publish the ordering claim in the case where it was never made.
+            ceiling_cause: UnprovenKind = (
+                "open_upper_bound" if order == "newer" else "release_order_unavailable"
+            )
             return _unknown(
                 "insufficient_evidence",
                 notices,
@@ -619,7 +630,7 @@ def _step_five(
                 # The satisfied gates *are* the open-ended ranges, so they are the evidence
                 # a caller has to read to see why nothing here amounts to a support statement.
                 [
-                    UnprovenClaim(kind="open_upper_bound", evidence_ids=gates),
+                    UnprovenClaim(kind=ceiling_cause, evidence_ids=gates),
                     *buckets.causes,
                 ],
             )

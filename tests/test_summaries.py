@@ -89,6 +89,8 @@ EXPECTED_TEMPLATES: tuple[str, ...] = (
     "selected; the request selects no extra, so compatibility is unknown.",
     "{declaring}'s {rule} has no upper bound and {declared_about} was released after it, "
     "so support for it was never stated.",
+    "{declaring}'s {rule} has no upper bound and no publication date was available to "
+    "order it against {declared_about}, so support for it was never stated.",
     "{declared_about} had already reached end of life when {declaring} was released, "
     "so {declaring}'s {rule} never stated support for it.",
     "{declaring}'s {rule} has no upper bound and {declared_about}'s official support "

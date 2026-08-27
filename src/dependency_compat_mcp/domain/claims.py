@@ -21,7 +21,7 @@ merely unlikely:
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime
 from typing import Final, Literal, assert_never
 
 from packaging.markers import InvalidMarker, Marker
@@ -63,6 +63,7 @@ __all__ = [
     "YankedInfo",
     "analyse_marker",
     "evidence_sort_key",
+    "official_day",
 ]
 
 type EvidenceId = str
@@ -392,6 +393,18 @@ class EolUnavailable:
 
 
 type EolStatus = EolPublished | EolUnpublished | EolNotApplicable | EolUnavailable
+
+
+def official_day(moment: datetime) -> date:
+    """Narrow an official instant back to the day its publisher actually stated.
+
+    The runtime adapter widens a published day to midnight UTC so every date it handles
+    has one comparable type. This is the single inverse of that widening, shared by the
+    wire field and the summary sentence: two callers narrowing the same instant by
+    different rules could disagree inside one response, and the response must never claim
+    a time of day that no official document announced.
+    """
+    return moment.astimezone(UTC).date()
 
 
 @dataclass(frozen=True, slots=True)

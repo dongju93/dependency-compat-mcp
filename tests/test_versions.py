@@ -137,7 +137,19 @@ def test_bounded_above_pep440(expression: str, expected: bool) -> None:
         # A union is closed only if *every* branch is; the `>=18` branch is not.
         (">=18 || ^16.5.0", False),
         ("^22 || ^20", True),
+        # An exact match closes the set from both sides, exactly as PEP 440's `==` does.
+        # node-semver spells it two ways and neither uses a comparison operator: a bare
+        # pin parses to the empty operator and `=1.20.1` to `=`.
+        ("1.20.1", True),
+        ("=1.20.1", True),
+        ("1.20.1 || 2.0.0", True),
+        ("1.20.1 || >=3", False),
+        # The wildcard range must stay open in both directions. node-semver gives it the
+        # operator `None` against an ANY sentinel, which is what keeps it out of the exact
+        # -match set above - the three spellings below are the regression this guards.
         ("*", False),
+        ("x", False),
+        ("", False),
     ],
 )
 def test_bounded_above_semver(expression: str, expected: bool) -> None:
@@ -168,6 +180,9 @@ def test_bounded_above_returns_none_for_an_unparseable_expression() -> None:
         ("~22.17.0", "semver", (22, 17, 0)),
         # A union's floor is its lowest branch, not its highest.
         (">=18 || ^16.5.0", "semver", (16, 5, 0)),
+        # An exact match is a floor as well as a ceiling, in both of its spellings.
+        ("1.20.1", "semver", (1, 20, 1)),
+        ("=1.20.1", "semver", (1, 20, 1)),
     ],
 )
 def test_lower_bound_finds_the_floor(
@@ -190,6 +205,7 @@ def test_lower_bound_finds_the_floor(
         ("<3.14", "pep440"),
         ("", "pep440"),
         ("*", "semver"),
+        ("x", "semver"),
         ("<20", "semver"),
         # One unbounded branch leaves the whole union unbounded below.
         ("^22 || *", "semver"),
