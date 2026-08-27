@@ -257,7 +257,7 @@ async def test_check_output_schema_is_the_three_variant_sum_type(
     open_upper_bound = schema["$defs"]["OpenUpperBoundOut"]
     next_actions = open_upper_bound["properties"]["next_actions"]
     assert next_actions["minItems"] == next_actions["maxItems"] == 1
-    assert next_actions["prefixItems"][0]["const"] == ("check_newer_declaring_release")
+    assert next_actions["prefixItems"][0]["const"] == "check_newer_declaring_release"
     assert (
         schema["$defs"]["UnprovenClaimOut"]["properties"]["evidence_ids"]["minItems"]
         == 1

@@ -239,11 +239,14 @@ class UnprovenClaimOut(_Out):
 
 
 class OpenUpperBoundOut(_Out):
-    """An open gate whose declaring release predates the release asked about.
+    """A satisfied open-ended gate that settles nothing on its own.
 
-    A later declaring release is the next exact-version question the tool can answer. The
-    action is part of this variant rather than an optional field on every cause, so an open
-    upper bound with no path forward has no public representation.
+    The declaring release predates the release asked about, or that ordering could not be
+    established because a publication timestamp was missing; either way the gate names no
+    ceiling, and asking about a later declaring release is the next exact-version question
+    the tool can answer. The action is part of this variant rather than an optional field
+    on every cause, so an open upper bound with no path forward has no public
+    representation.
     """
 
     kind: Literal["open_upper_bound"] = "open_upper_bound"
