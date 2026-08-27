@@ -184,6 +184,7 @@ def test_an_open_ceiling_on_a_later_runtime_is_unknown_not_supported() -> None:
                 "example-pkg",
                 "1.0",
                 requires_python=">=3.10",
+                classifiers=["Programming Language :: Python :: 3.12"],
                 uploaded="2023-01-01T00:00:00.000000Z",
             )
         }
@@ -199,8 +200,16 @@ def test_an_open_ceiling_on_a_later_runtime_is_unknown_not_supported() -> None:
     assert _kinds(result) == ["open_upper_bound"]
     # The cause cites the gate itself, so the caller can read the open range it names.
     assert result["decision_causes"][0]["evidence_ids"] == ["evidence-1"]
+    assert result["decision_causes"][0]["next_actions"] == [
+        "check_newer_declaring_release"
+    ]
     # The gate is still returned: "it installs" is exactly the fact the caller needs.
     assert any(e.get("expression") == ">=3.10" for e in result["evidence"])
+    classifier = next(
+        e for e in result["evidence"] if e["source_type"] == "registry_classifier"
+    )
+    # A missing 3.13 classifier is not negative evidence and must not become causal.
+    assert classifier["id"] not in result["decision_causes"][0]["evidence_ids"]
     assert "verdict_evidence_ids" not in result
 
 

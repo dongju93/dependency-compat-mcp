@@ -38,7 +38,7 @@ from dependency_compat_mcp.domain.diagnostics import (
     GuardKind,
     LimitationCode,
     NoticeCode,
-    UnprovenKind,
+    OtherUnprovenKind,
 )
 from dependency_compat_mcp.domain.relations import Direction, RuleName
 from dependency_compat_mcp.domain.targets import Namespace, VersionScheme
@@ -65,6 +65,7 @@ __all__ = [
     "MarkerGuardOut",
     "NarrativeEvidenceOut",
     "NoticeOut",
+    "OpenUpperBoundOut",
     "RelationOut",
     "ResolvedRelationOut",
     "SourceCheckOut",
@@ -233,14 +234,28 @@ class ConditionalClaimOut(_Out):
 class UnprovenClaimOut(_Out):
     """Evidence that was read and understood, but stops short of settling the question."""
 
-    # The domain's own set, not a restatement of it: two lists to keep in step is how a
-    # published schema drifts from the values the server can actually produce.
-    kind: UnprovenKind
+    kind: OtherUnprovenKind
     evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
 
 
+class OpenUpperBoundOut(_Out):
+    """An open gate whose declaring release predates the release asked about.
+
+    A later declaring release is the next exact-version question the tool can answer. The
+    action is part of this variant rather than an optional field on every cause, so an open
+    upper bound with no path forward has no public representation.
+    """
+
+    kind: Literal["open_upper_bound"] = "open_upper_bound"
+    evidence_ids: Annotated[tuple[str, ...], Field(min_length=1)]
+    next_actions: tuple[Literal["check_newer_declaring_release"]] = (
+        "check_newer_declaring_release",
+    )
+
+
 type DecisionCauseOut = Annotated[
-    ConditionalClaimOut | UnprovenClaimOut, Field(discriminator="kind")
+    ConditionalClaimOut | OpenUpperBoundOut | UnprovenClaimOut,
+    Field(discriminator="kind"),
 ]
 
 

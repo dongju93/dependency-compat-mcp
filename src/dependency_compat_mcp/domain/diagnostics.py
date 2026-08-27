@@ -35,6 +35,7 @@ __all__ = [
     "LimitationCode",
     "Notice",
     "NoticeCode",
+    "OtherUnprovenKind",
     "UnprovenClaim",
     "UnprovenKind",
     "cause_evidence_ids",
@@ -124,14 +125,15 @@ type GuardKind = Literal["environment_marker", "extra_marker"]
 # Every cause kind except the conditional one, which is a separate type because it
 # carries a marker. Named so the summary table can be keyed by it and be *total*: adding
 # a kind without a sentence for it then fails to type-check rather than at request time.
-type UnprovenKind = Literal[
-    "open_upper_bound",
+type OtherUnprovenKind = Literal[
     "stale_lower_bound",
     "lifecycle_unavailable",
     "tier_c_only",
     "claim_outside_range",
     "uncomparable_claim",
 ]
+
+type UnprovenKind = Literal["open_upper_bound"] | OtherUnprovenKind
 
 type CauseKind = Literal["conditional_claim"] | UnprovenKind
 

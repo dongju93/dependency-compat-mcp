@@ -42,6 +42,7 @@ from dependency_compat_mcp.contracts.outputs import (
     MarkerGuardOut,
     NarrativeEvidenceOut,
     NoticeOut,
+    OpenUpperBoundOut,
     RelationOut,
     ResolvedRelationOut,
     SourceCheckOut,
@@ -269,7 +270,19 @@ def _causes_out(
                     )
                 )
             case UnprovenClaim(kind=kind):
-                out.append(UnprovenClaimOut(kind=kind, evidence_ids=public_ids))
+                match kind:
+                    case "open_upper_bound":
+                        out.append(OpenUpperBoundOut(evidence_ids=public_ids))
+                    case (
+                        "stale_lower_bound"
+                        | "lifecycle_unavailable"
+                        | "tier_c_only"
+                        | "claim_outside_range"
+                        | "uncomparable_claim"
+                    ):
+                        out.append(UnprovenClaimOut(kind=kind, evidence_ids=public_ids))
+                    case never:
+                        assert_never(never)
             case _:
                 assert_never(cause)
     return tuple(out)
