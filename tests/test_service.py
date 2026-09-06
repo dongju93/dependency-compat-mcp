@@ -343,7 +343,6 @@ def test_a_missing_release_is_reported_apart_from_a_failed_lookup() -> None:
         {"name": "example-pkg", "version": 7},
         {"name": "invalid name!", "version": "1.0"},
         {"name": "example-pkg", "version": "invalid"},
-        {"name": "example-pkg", "version": "v1.0"},
     ],
 )
 def test_invalid_pypi_identity_fails_both_tools_without_evidence(
@@ -382,6 +381,36 @@ def test_invalid_pypi_identity_fails_both_tools_without_evidence(
     }
     assert row["outcome"] == "failed"
     assert row["detail"] == "invalid_document"
+
+
+@pytest.mark.parametrize("declared", ["v1.0", "1.0.0"])
+def test_a_non_canonical_metadata_spelling_still_answers_the_question(
+    declared: str,
+) -> None:
+    """A legacy spelling PyPI accepted at publish time must not cost the caller an answer.
+
+    ``v1.0`` and ``1.0.0`` are both release 1.0 under PEP 440. The caller boundary would
+    refuse either as input, but refusing them *here* would report a release the server
+    successfully read as an unreadable document.
+    """
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("example-pkg", "1.0"): {
+                "info": {
+                    "name": "example-pkg",
+                    "version": declared,
+                    "requires_python": ">=3.10,<4",
+                }
+            }
+        }
+    )
+    result = _check(
+        build_service(fetcher),
+        ("pypi", "example-pkg", "1.0"),
+        ("runtime", "python", "3.13.0"),
+    )
+    assert result["verdict"] == "supported"
+    assert _outcome(result, "pypi_json") == "ok"
 
 
 def test_a_pypi_context_404_remains_release_not_found() -> None:

@@ -7,6 +7,12 @@ body whose ``info.name`` and ``info.version`` do not identify the requested rele
 Missing, malformed or mismatched identity fields are lookup failures, not proof that
 the release does not exist; only HTTP 404 establishes absence.
 
+That identity check compares *meanings*, not spellings. The caller boundary's
+no-silent-correction rule governs what a caller may type; it does not govern what PyPI
+stores, and PyPI still serves releases published under a legacy but valid PEP 440
+spelling. Holding registry metadata to the caller's rule would turn a perfectly usable
+document into ``invalid_document``, so identity here is PEP 440 equality.
+
 Which tier each field lands in is fixed by 03 "근거 티어" and is not a judgement call here:
 
 * ``requires_python`` and ``requires_dist`` are tier A. Installers enforce them, so a
@@ -27,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Final, assert_never
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion, Version
 
 from dependency_compat_mcp.adapters.protocol import (
     LookupFailed,
@@ -55,7 +62,6 @@ from dependency_compat_mcp.domain.targets import (
     PyPITarget,
     Target,
     TargetId,
-    parse_pep440_version,
     parse_pypi_name,
 )
 from dependency_compat_mcp.infra.http import (
@@ -356,16 +362,28 @@ def _unique_id(base: EvidenceId, used: set[EvidenceId]) -> EvidenceId:
 
 
 def _matches_release_identity(info: dict[str, object], target: PyPITarget) -> bool:
+    """Does this document describe the release that was asked for?
+
+    Both sides are compared after interpretation: ``canonicalize_name`` folds the
+    project name, and PEP 440 equality decides the version. ``parse_pep440_version``
+    is deliberately *not* used - it is the caller-input parser and rejects any spelling
+    it would rewrite, which would discard a release PyPI genuinely published under an
+    accepted non-canonical spelling such as ``v5.2.1``. Only a version ``packaging``
+    cannot interpret at all leaves the document unidentifiable.
+    """
     name = info.get("name")
     version = info.get("version")
     if not isinstance(name, str) or not isinstance(version, str):
         return False
     try:
         parsed_name = parse_pypi_name(name)
-        parsed_version = parse_pep440_version(version)
     except InputError:
         return False
-    return parsed_name == target.name and parsed_version.parsed == target.version.parsed
+    try:
+        declared = Version(version)
+    except InvalidVersion:
+        return False
+    return parsed_name == target.name and declared == target.version.parsed
 
 
 def _earliest_upload(files: Sequence[object]) -> datetime | None:

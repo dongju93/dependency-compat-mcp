@@ -360,7 +360,7 @@ def test_a_release_whose_every_file_is_yanked_is_withdrawn() -> None:
 
 def test_a_version_spelling_we_cannot_parse_is_an_invalid_document() -> None:
     payload = load("pypi_sample_project_5.2.1.json")
-    payload["info"]["version"] = "v5.2.1"
+    payload["info"]["version"] = "release-five"
     assert fetch(ok(payload)) == LookupFailed(
         target=pypi_target(), detail="invalid_document"
     )
@@ -480,10 +480,16 @@ def test_equivalent_project_names_still_identify_this_release(name: str) -> None
     assert isinstance(fetch(ok(payload)), ReleaseDocument)
 
 
-def test_an_equivalent_version_spelling_is_still_this_release() -> None:
+@pytest.mark.parametrize("version", ["5.2.1.0", "v5.2.1", "V5.2.1", "5.2.1.0.0"])
+def test_an_equivalent_version_spelling_is_still_this_release(version: str) -> None:
+    """Registry metadata is held to PEP 440 equality, not to the caller's spelling rule.
+
+    The tool boundary refuses ``v5.2.1`` because the server does not rewrite what a
+    caller typed. PyPI is not a caller: it serves releases published under spellings
+    PEP 440 accepts and normalises, and each of these names release 5.2.1.
+    """
     payload = load("pypi_sample_project_5.2.1.json")
-    payload["info"]["version"] = "5.2.1.0"
-    # PEP 440 says 5.2.1 == 5.2.1.0, so this is the release that was asked for.
+    payload["info"]["version"] = version
     assert isinstance(fetch(ok(payload)), ReleaseDocument)
 
 
