@@ -3,7 +3,9 @@
 The per-release endpoint ``/pypi/{name}/{version}/json`` is used rather than the project
 endpoint because 03 [3] forbids substituting a nearby release: the URL names the exact
 version, PyPI answers 404 when it does not exist, and the parser additionally rejects a
-body whose ``info.version`` is not the release that was asked for.
+body whose ``info.name`` and ``info.version`` do not identify the requested release.
+Missing, malformed or mismatched identity fields are lookup failures, not proof that
+the release does not exist; only HTTP 404 establishes absence.
 
 Which tier each field lands in is fixed by 03 "근거 티어" and is not a judgement call here:
 
@@ -133,12 +135,10 @@ def parse_release(
         return LookupFailed(target=target, detail="invalid_document")
     info = payload.get("info")
     if not isinstance(info, dict):
-        # The envelope is not what the API documents. Individual *fields* may be missing
-        # without complaint, but a missing `info` means we did not get a release document.
+        # A missing `info` means we did not get a release document.
         return LookupFailed(target=target, detail="invalid_document")
-    if _names_a_different_release(info, target):
-        # Defence in depth for 03's "never substitute a nearby release".
-        return ReleaseNotFound(target=target)
+    if not _matches_release_identity(info, target):
+        return LookupFailed(target=target, detail="invalid_document")
 
     urls = payload.get("urls")
     files: Sequence[object] = urls if isinstance(urls, list) else ()
@@ -355,16 +355,17 @@ def _unique_id(base: EvidenceId, used: set[EvidenceId]) -> EvidenceId:
     return identifier
 
 
-def _names_a_different_release(info: dict[str, object], target: PyPITarget) -> bool:
-    declared = info.get("version")
-    if not isinstance(declared, str):
+def _matches_release_identity(info: dict[str, object], target: PyPITarget) -> bool:
+    name = info.get("name")
+    version = info.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
         return False
     try:
-        parsed = parse_pep440_version(declared)
+        parsed_name = parse_pypi_name(name)
+        parsed_version = parse_pep440_version(version)
     except InputError:
-        # PyPI spelled the version in a form we cannot compare. Do not invent a mismatch.
         return False
-    return parsed.parsed != target.version.parsed
+    return parsed_name == target.name and parsed_version.parsed == target.version.parsed
 
 
 def _earliest_upload(files: Sequence[object]) -> datetime | None:

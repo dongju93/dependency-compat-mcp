@@ -328,6 +328,71 @@ def test_a_missing_release_is_reported_apart_from_a_failed_lookup() -> None:
     assert _outcome(failing, "pypi_json") == "failed"
 
 
+@pytest.mark.parametrize("tool", ["check", "context"])
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"name": "example-pkg", "version": "2.0"},
+        {"name": "another-pkg", "version": "1.0"},
+        {"version": "1.0"},
+        {"name": "example-pkg"},
+        {},
+        {"name": None, "version": "1.0"},
+        {"name": "example-pkg", "version": None},
+        {"name": 7, "version": "1.0"},
+        {"name": "example-pkg", "version": 7},
+        {"name": "invalid name!", "version": "1.0"},
+        {"name": "example-pkg", "version": "invalid"},
+        {"name": "example-pkg", "version": "v1.0"},
+    ],
+)
+def test_invalid_pypi_identity_fails_both_tools_without_evidence(
+    tool: str, identity: dict[str, object]
+) -> None:
+    fetcher = FakeFetcher(
+        payloads={
+            pypi_url("example-pkg", "1.0"): {
+                "info": {
+                    **identity,
+                    "requires_python": ">=3.10,<4",
+                    "requires_dist": ["helper>=1"],
+                    "classifiers": ["Programming Language :: Python :: 3.13"],
+                }
+            }
+        }
+    )
+    service = build_service(fetcher)
+    target = ("pypi", "example-pkg", "1.0")
+    if tool == "check":
+        result = _check(service, target, ("runtime", "python", "3.13.0"))
+        assert result["verdict"] == "unknown"
+        assert "verdict_evidence_ids" not in result
+    else:
+        result = _context(service, target)
+        assert result["availability"] == "unknown"
+        assert result["constraints"] == []
+
+    assert result["reason"] == "lookup_failed"
+    assert result["evidence"] == []
+    row = _row(result, "pypi_json")
+    assert row["target"] == {
+        "namespace": "pypi",
+        "name": "example-pkg",
+        "version": "1.0",
+    }
+    assert row["outcome"] == "failed"
+    assert row["detail"] == "invalid_document"
+
+
+def test_a_pypi_context_404_remains_release_not_found() -> None:
+    result = _context(build_service(FakeFetcher()), ("pypi", "example-pkg", "1.0"))
+    assert result["availability"] == "unknown"
+    assert result["reason"] == "release_not_found"
+    assert _outcome(result, "pypi_json") == "not_found"
+    assert result["constraints"] == []
+    assert result["evidence"] == []
+
+
 def test_the_call_level_budget_cancels_owned_lookups_and_returns_unknown() -> None:
     fetcher = SlowFetcher()
     result = _check(
