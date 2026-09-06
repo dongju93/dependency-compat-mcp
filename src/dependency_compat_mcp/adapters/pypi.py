@@ -3,7 +3,15 @@
 The per-release endpoint ``/pypi/{name}/{version}/json`` is used rather than the project
 endpoint because 03 [3] forbids substituting a nearby release: the URL names the exact
 version, PyPI answers 404 when it does not exist, and the parser additionally rejects a
-body whose ``info.version`` is not the release that was asked for.
+body whose ``info.name`` and ``info.version`` do not identify the requested release.
+Missing, malformed or mismatched identity fields are lookup failures, not proof that
+the release does not exist; only HTTP 404 establishes absence.
+
+That identity check compares *meanings*, not spellings. The caller boundary's
+no-silent-correction rule governs what a caller may type; it does not govern what PyPI
+stores, and PyPI still serves releases published under a legacy but valid PEP 440
+spelling. Holding registry metadata to the caller's rule would turn a perfectly usable
+document into ``invalid_document``, so identity here is PEP 440 equality.
 
 Which tier each field lands in is fixed by 03 "근거 티어" and is not a judgement call here:
 
@@ -25,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Final, assert_never
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion, Version
 
 from dependency_compat_mcp.adapters.protocol import (
     LookupFailed,
@@ -53,7 +62,6 @@ from dependency_compat_mcp.domain.targets import (
     PyPITarget,
     Target,
     TargetId,
-    parse_pep440_version,
     parse_pypi_name,
 )
 from dependency_compat_mcp.infra.http import (
@@ -133,12 +141,10 @@ def parse_release(
         return LookupFailed(target=target, detail="invalid_document")
     info = payload.get("info")
     if not isinstance(info, dict):
-        # The envelope is not what the API documents. Individual *fields* may be missing
-        # without complaint, but a missing `info` means we did not get a release document.
+        # A missing `info` means we did not get a release document.
         return LookupFailed(target=target, detail="invalid_document")
-    if _names_a_different_release(info, target):
-        # Defence in depth for 03's "never substitute a nearby release".
-        return ReleaseNotFound(target=target)
+    if not _matches_release_identity(info, target):
+        return LookupFailed(target=target, detail="invalid_document")
 
     urls = payload.get("urls")
     files: Sequence[object] = urls if isinstance(urls, list) else ()
@@ -355,16 +361,29 @@ def _unique_id(base: EvidenceId, used: set[EvidenceId]) -> EvidenceId:
     return identifier
 
 
-def _names_a_different_release(info: dict[str, object], target: PyPITarget) -> bool:
-    declared = info.get("version")
-    if not isinstance(declared, str):
+def _matches_release_identity(info: dict[str, object], target: PyPITarget) -> bool:
+    """Does this document describe the release that was asked for?
+
+    Both sides are compared after interpretation: ``canonicalize_name`` folds the
+    project name, and PEP 440 equality decides the version. ``parse_pep440_version``
+    is deliberately *not* used - it is the caller-input parser and rejects any spelling
+    it would rewrite, which would discard a release PyPI genuinely published under an
+    accepted non-canonical spelling such as ``v5.2.1``. Only a version ``packaging``
+    cannot interpret at all leaves the document unidentifiable.
+    """
+    name = info.get("name")
+    version = info.get("version")
+    if not isinstance(name, str) or not isinstance(version, str):
         return False
     try:
-        parsed = parse_pep440_version(declared)
+        parsed_name = parse_pypi_name(name)
     except InputError:
-        # PyPI spelled the version in a form we cannot compare. Do not invent a mismatch.
         return False
-    return parsed.parsed != target.version.parsed
+    try:
+        declared = Version(version)
+    except InvalidVersion:
+        return False
+    return parsed_name == target.name and declared == target.version.parsed
 
 
 def _earliest_upload(files: Sequence[object]) -> datetime | None:
